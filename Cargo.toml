@@ -12,3 +12,4 @@ tokio = {version = "0.2", features = ["full"]}
 futures = "0.3"
 rustls = "0.16"
 tokio-rustls = "0.12.2"
+nix = "0.16.1"
