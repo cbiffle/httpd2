@@ -1,10 +1,18 @@
 use std::net::SocketAddr;
+use std::fs;
+use std::io;
+use std::sync::Arc;
 
 use futures::TryStreamExt;
 
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::error::Error;
-use hyper::service::{make_service_fn, service_fn};
+use hyper::service::{service_fn};
+
+use rustls::{NoClientAuth, ServerConfig, ProtocolVersion};
+
+use tokio::stream::StreamExt;
+use tokio_rustls::TlsAcceptor;
 
 async fn hello_world(req: Request<Body>) -> Result<Response<Body>, Error> {
     let mut response = Response::new(Body::empty());
@@ -42,25 +50,52 @@ async fn hello_world(req: Request<Body>) -> Result<Response<Body>, Error> {
     Ok(response)
 }
 
-async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C handler")
-}
-
 #[tokio::main]
 async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
-    let svc = make_service_fn(|_conn| async {
-        Ok::<_, Error>(service_fn(hello_world))
-    });
+    let mut config = ServerConfig::new(NoClientAuth::new());
+    let key = rustls::internal::pemfile::pkcs8_private_keys(
+        &mut io::BufReader::new(
+            fs::File::open("localhost.key").expect("can't open localhost.key")
+        )
+    ).expect("can't load key").pop().expect("no keys?");
+    let cert_chain = rustls::internal::pemfile::certs(
+        &mut io::BufReader::new(
+            fs::File::open("localhost.crt").expect("can't open localhost.crt")
+        )
+    ).expect("can't load cert");
+    config.set_single_cert(cert_chain, key).expect("can't set cert");
+    config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    let server = Server::bind(&addr)
-        .serve(svc)
-        .with_graceful_shutdown(shutdown_signal());
+    let tls_acceptor = TlsAcceptor::from(Arc::new(config));
 
-    if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
+    let mut listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("Could not bind");
+
+    let http = hyper::server::conn::Http::new();
+    // TODO settings here
+
+    let mut incoming = listener.incoming();
+    while let Some(stream) = incoming.next().await {
+        if let Ok(socket) = stream {
+            let tls_acceptor = tls_acceptor.clone();
+            let http = http.clone();
+            tokio::spawn(async move {
+                if let Ok(stream) = tls_acceptor.accept(socket).await {
+                    let r = http.serve_connection(stream, service_fn(hello_world)).await;
+                    match r {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("error in connection: {}", e),
+                    }
+                } else {
+                    eprintln!("error in handshake");
+                }
+            });
+        } else {
+            eprintln!("error accepting");
+        }
     }
 }
