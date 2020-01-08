@@ -40,6 +40,12 @@ async fn main() {
             .help("Specifies that the server should chroot into DIR. You\n\
                    basically always want this, unless you're running the\n\
                    server as an unprivileged user."))
+        .arg(clap::Arg::with_name("addr")
+            .short("A")
+            .long("addr")
+            .takes_value(true)
+            .value_name("ADDR:PORT")
+            .help("Address and port to bind."))
         .arg(clap::Arg::with_name("DIR")
             .help("Path to serve")
             .required(true)
@@ -48,15 +54,14 @@ async fn main() {
 
     let path = matches.value_of("DIR").unwrap();
     let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
+    let addr = value_t!(matches, "addr", SocketAddr)
+        .unwrap_or(SocketAddr::from(([0,0,0,0], 8000)));
 
     // Things that need to get done while root:
     // - Binding to privileged ports.
     // - Reading SSL private key.
     // - Chrooting.
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    let mut config = ServerConfig::new(NoClientAuth::new());
     let key = rustls::internal::pemfile::pkcs8_private_keys(
         &mut io::BufReader::new(
             fs::File::open("localhost.key").expect("can't open localhost.key")
@@ -67,9 +72,10 @@ async fn main() {
             fs::File::open("localhost.crt").expect("can't open localhost.crt")
         )
     ).expect("can't load cert");
-    config.set_single_cert(cert_chain, key).expect("can't set cert");
-    config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    let mut listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("Could not bind");
 
     // Beginning to drop privileges here
 
@@ -77,11 +83,12 @@ async fn main() {
         nix::unistd::chroot(&*path).expect("can't chroot");
     }
 
-    let tls_acceptor = TlsAcceptor::from(Arc::new(config));
+    let mut config = ServerConfig::new(NoClientAuth::new());
+    config.set_single_cert(cert_chain, key).expect("can't set cert");
+    config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    let mut listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("Could not bind");
+    let tls_acceptor = TlsAcceptor::from(Arc::new(config));
 
     let http = hyper::server::conn::Http::new();
     // TODO settings here
