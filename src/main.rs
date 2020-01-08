@@ -29,7 +29,30 @@ async fn hello_world(req: Request<Body>) -> Result<Response<Body>, Error> {
 
 #[tokio::main]
 async fn main() {
-    let path = std::env::args().nth(1);
+    use clap::value_t;
+
+    // Go ahead and parse arguments before dropping privileges, since they
+    // control whether we drop privileges, among other things.
+    let matches = clap::App::new("httpd2")
+        .arg(clap::Arg::with_name("chroot")
+            .short("c")
+            .long("chroot")
+            .help("Specifies that the server should chroot into DIR. You\n\
+                   basically always want this, unless you're running the\n\
+                   server as an unprivileged user."))
+        .arg(clap::Arg::with_name("DIR")
+            .help("Path to serve")
+            .required(true)
+            .index(1))
+        .get_matches();
+
+    let path = matches.value_of("DIR").unwrap();
+    let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
+
+    // Things that need to get done while root:
+    // - Binding to privileged ports.
+    // - Reading SSL private key.
+    // - Chrooting.
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
@@ -48,7 +71,9 @@ async fn main() {
     config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    if let Some(path) = path {
+    // Beginning to drop privileges here
+
+    if should_chroot {
         nix::unistd::chroot(&*path).expect("can't chroot");
     }
 
