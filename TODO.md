@@ -2,6 +2,4 @@
 
 - Customizable xtension to mimetype mapping.
 
-- Logging
-
 - If Modified Since

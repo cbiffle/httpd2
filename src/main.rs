@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::SystemTime;
 
 use hyper::service::service_fn;
@@ -107,15 +107,23 @@ enum FileOrDir {
 ///
 /// If the path turns out to be a directory, returns `FileOrDir::Dir` only if it
 /// meets all the above criteria.
-async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
+async fn picky_open(log: &slog::Logger, path: &Path) -> Result<FileOrDir, io::Error> {
+    slog::debug!(log, "picky_open({:?})", path);
+
     use std::os::unix::fs::PermissionsExt;
-    let file = fs::File::open(path).await?;
+    let file = fs::File::open(path).await
+        .map_err(|e| {
+            slog::debug!(log, "can't open: {}", e);
+            e
+        })?;
     let meta = file.metadata().await?;
     let mode = meta.permissions().mode();
 
     if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
+        slog::debug!(log, "mode {:#o} is not OK", mode);
         Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
     } else if meta.is_file() {
+        slog::debug!(log, "opened");
         Ok(FileOrDir::File {
             file,
             content_type: map_content_type(path),
@@ -123,8 +131,10 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
             modified: meta.modified().unwrap(),
         })
     } else if meta.is_dir() {
+        slog::debug!(log, "found dir");
         Ok(FileOrDir::Dir)
     } else {
+        slog::debug!(log, "neither file nor dir");
         Err(io::Error::new(io::ErrorKind::NotFound, "type"))
     }
 }
@@ -136,12 +146,14 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
 /// the `index.html` has the appropriate permissions and is a regular file, the
 /// open operation succeeds, returning its contents.
 async fn picky_open_with_redirect(
+    log: &slog::Logger,
     path: &mut String,
 ) -> Result<FileOrDir, io::Error> {
-    match picky_open(Path::new(path)).await? {
+    match picky_open(log, Path::new(path)).await? {
         FileOrDir::Dir => {
+            slog::debug!(log, "--> index.html");
             path.push_str("/index.html");
-            picky_open(Path::new(path)).await
+            picky_open(log, Path::new(path)).await
         }
         r => Ok(r),
     }
@@ -162,9 +174,10 @@ async fn picky_open_with_redirect(
 /// Returns the normal `FileOrDir` result, plus an optional `Content-Encoding`
 /// value if an alternate encoding was selected.
 async fn picky_open_with_redirect_and_gzip(
+    log: &slog::Logger,
     path: &mut String,
 ) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
-    match picky_open_with_redirect(path).await? {
+    match picky_open_with_redirect(log, path).await? {
         FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
         FileOrDir::File {
             file,
@@ -172,31 +185,38 @@ async fn picky_open_with_redirect_and_gzip(
             content_type,
             modified,
         } => {
+            slog::debug!(log, "checking for precompressed alternate");
             path.push_str(".gz");
-            match picky_open(Path::new(path)).await {
+            match picky_open(log, Path::new(path)).await {
                 Ok(FileOrDir::File {
                     file,
                     len,
                     modified: cmod,
                     ..
-                }) if cmod >= modified => Ok((
-                    FileOrDir::File {
-                        file,
-                        len,
-                        content_type,
-                        modified,
-                    },
-                    Some("gzip"),
-                )),
-                _ => Ok((
-                    FileOrDir::File {
-                        file,
-                        len,
-                        content_type,
-                        modified,
-                    },
-                    None,
-                )),
+                }) if cmod >= modified => {
+                    slog::debug!(log, "serving gzip");
+                    Ok((
+                        FileOrDir::File {
+                            file,
+                            len,
+                            content_type,
+                            modified,
+                        },
+                        Some("gzip"),
+                    ))
+                },
+                _ => {
+                    slog::debug!(log, "serving uncompressed");
+                    Ok((
+                        FileOrDir::File {
+                            file,
+                            len,
+                            content_type,
+                            modified,
+                        },
+                        None,
+                    ))
+                }
             }
         }
     }
@@ -364,7 +384,7 @@ impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
 }
 
 /// Attempts to serve a file in response to `req`.
-async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
+async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
 
     // Scan the request headers to see if gzip compressed responses are OK.
@@ -386,14 +406,14 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
             // It appears that Hyper blocks non-ASCII characters.
             // Allocate enough room for a path that doesn't require
             // sanitization, plus the initial dot-slash.
+            slog::info!(log, "{} {}", method, path);
             let mut sanitized = sanitize_path(path);
-            println!("path: {}", sanitized);
 
             // Select content encoding.
             let open_result = if accept_gzip {
-                picky_open_with_redirect_and_gzip(&mut sanitized).await
+                picky_open_with_redirect_and_gzip(&log, &mut sanitized).await
             } else {
-                picky_open_with_redirect(&mut sanitized)
+                picky_open_with_redirect(&log, &mut sanitized)
                     .await
                     .map(|f| (f, None))
             };
@@ -432,6 +452,7 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
                     }
 
                     if method == Method::GET {
+                        slog::info!(log, "OK: len={} encoding={:?}", len, enc);
                         *response.body_mut() = Body::wrap_stream(
                             codec::BytesCodec::new()
                                 .framed(file)
@@ -439,13 +460,18 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
                         );
                     }
                 }
-                _ => {
-                    // To avoid disclosing information, we signal any other case
-                    // as 404. Cases covered here include:
-                    // - Actual file not found.
-                    // - Permissions did not permit file to be served.
-                    // - One level of directory redirect followed, but still
-                    //   found a directory.
+                // To avoid disclosing information, we signal any other case
+                // as 404. Cases covered here include:
+                // - Actual file not found.
+                // - Permissions did not permit file to be served.
+                // - One level of directory redirect followed, but still
+                //   found a directory.
+                Ok(_) => {
+                    slog::warn!(log, "failed: would serve directory");
+                    *response.status_mut() = StatusCode::NOT_FOUND;
+                }
+                Err(e) => {
+                    slog::warn!(log, "failed: {}", e);
                     *response.status_mut() = StatusCode::NOT_FOUND;
                 }
             }
@@ -601,7 +627,7 @@ fn drop_privs(args: &Args) -> Result<(), ServeError> {
     Ok(())
 }
 
-async fn start() -> Result<(), ServeError> {
+async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let args = match get_args() {
@@ -632,25 +658,48 @@ async fn start() -> Result<(), ServeError> {
     let http = hyper::server::conn::Http::new();
 
     let mut incoming = listener.incoming();
+    let connection_counter = AtomicU64::new(0);
     while let Some(stream) = incoming.next().await {
         if let Ok(socket) = stream {
+            let log = log.new(slog::o!(
+                "peer" => socket.peer_addr().map(|sa| sa.to_string()).unwrap_or_else(|_| "UNKNOWN".to_string()),
+                "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
+            ));
             let tls_acceptor = tls_acceptor.clone();
             let http = http.clone();
             tokio::spawn(async move {
-                if let Ok(stream) = tls_acceptor.accept(socket).await {
+                match tls_acceptor.accept(socket).await {
+                Ok(stream) => {
+                    use rustls::Session;
+
+                    let session = stream.get_ref().1;
+                    slog::debug!(log, "ALPN result: {:?}", std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE")).unwrap_or("BOGUS").to_string());
+                    let request_counter = AtomicU64::new(0);
                     let r = http
-                        .serve_connection(stream, service_fn(serve_files))
+                        .serve_connection(stream, service_fn(|x| {
+                            let log = log.new(slog::o!(
+                                "rid" => request_counter.fetch_add(1, Ordering::Relaxed),
+                            ));
+                            serve_files(log, x)
+                        }))
                         .await;
                     match r {
                         Ok(_) => (),
-                        Err(e) => eprintln!("error in connection: {}", e),
+                        Err(e) => {
+                            if !e.is_closed() && !e.is_canceled() {
+                                slog::warn!(log, "error in connection: {}", e);
+                            }
+                        }
                     }
-                } else {
-                    eprintln!("error in handshake");
+                    slog::info!(log, "connection closed");
                 }
+                Err(e) => {
+                    slog::warn!(log, "error in TLS handshake: {}", e);
+                }
+            }
             });
         } else {
-            eprintln!("error accepting");
+            slog::warn!(log, "error accepting");
         }
     }
 
@@ -659,7 +708,14 @@ async fn start() -> Result<(), ServeError> {
 
 #[tokio::main]
 async fn main() {
-    start().await.expect("server failed")
+    use slog::Drain;
+
+    let decorator = slog_term::PlainDecorator::new(std::io::stderr());
+    let drain = slog_term::CompactFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let log = slog::Logger::root(drain, slog::o!());
+
+    start(log).await.expect("server failed")
 }
 
 #[cfg(test)]
