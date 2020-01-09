@@ -216,25 +216,74 @@ fn map_content_type(path: &Path) -> &'static str {
     }
 }
 
-fn sanitize_path(path: &str) -> String {
-    let mut sanitized = String::with_capacity(path.len() + 2);
-    sanitized.push_str("./");
+struct Sanitizer<I> {
+    inner: I,
+    state: SanitizerState,
+}
 
-    // Transfer characters one at a time.
-    for c in path.chars() {
-        match c {
-            // Squash NUL to underscore.
-            '\0' => sanitized.push('_'),
-            // Drop duplicate slashes.
-            '/' if sanitized.ends_with("/") => (),
-            // Add one dot to any dot after slash to avoid traversal.
-            '.' if sanitized.ends_with("/") => sanitized.push(':'),
-            // Otherwise, fine, we'll give it a try.
-            _ => sanitized.push(c),
+impl<I> From<I> for Sanitizer<I> {
+    fn from(inner: I) -> Self {
+        Self { inner, state: SanitizerState::EmitDot }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SanitizerState {
+    EmitDot,
+    EmitSlash,
+    Normal,
+    Slash,
+}
+
+impl<I: Iterator<Item = char>> Iterator for Sanitizer<I> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.state {
+            SanitizerState::EmitDot => {
+                self.state = SanitizerState::EmitSlash;
+                return Some('.')
+            }
+            SanitizerState::EmitSlash => {
+                self.state = SanitizerState::Slash;
+                return Some('/')
+            }
+            _ => (),
+        }
+
+        loop {
+            match (self.state, self.inner.next()?) {
+                (_, '\0') => {
+                    self.state = SanitizerState::Normal;
+                    break Some('_')
+                }
+                (SanitizerState::Normal, '/') => {
+                    self.state = SanitizerState::Slash;
+                    break Some('/')
+                }
+                (SanitizerState::Slash, '/') => continue,
+                (SanitizerState::Slash, '.') => {
+                    self.state = SanitizerState::Normal;
+                    break Some(':')
+                }
+                (_, c) => {
+                    self.state = SanitizerState::Normal;
+                    break Some(c)
+                }
+            }
         }
     }
 
-    sanitized
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // We alter the inner size-hint because it's possible that we discard
+        // all characters. The max length is extended by the initial dot-slash.
+        (0, self.inner.size_hint().1.map(|x| x + 2))
+    }
+}
+
+
+fn sanitize_path(path: &str) -> String {
+    Sanitizer::from(path.chars()).collect()
 }
 
 /// Attempts to serve a file in response to `req`.
@@ -534,4 +583,22 @@ async fn start() -> Result<(), ServeError> {
 #[tokio::main]
 async fn main() {
     start().await.expect("server failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize() {
+        assert_eq!(sanitize_path(""), "./");
+        assert_eq!(sanitize_path("///"), "./");
+        assert_eq!(sanitize_path("."), "./:");
+        assert_eq!(sanitize_path("/."), "./:");
+        assert_eq!(sanitize_path(".."), "./:.");
+        assert_eq!(sanitize_path("\0"), "./_");
+        assert_eq!(sanitize_path("/\0"), "./_");
+
+        assert_eq!(sanitize_path("//.././doc.pdf\0/"), "./:./:/doc.pdf_/");
+    }
 }
