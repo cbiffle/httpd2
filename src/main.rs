@@ -291,6 +291,9 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     Ok(response)
 }
 
+const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
+const DEFAULT_PORT: u16 = 8000;
+
 #[tokio::main]
 async fn main() {
     use clap::value_t;
@@ -343,7 +346,7 @@ async fn main() {
     let path = matches.value_of("DIR").unwrap();
     let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
     let addr = value_t!(matches, "addr", SocketAddr)
-        .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 8000)));
+        .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
     let uid = if let Some(uid) = matches.value_of("uid") {
         Some(uid.parse::<libc::uid_t>().expect("bad UID value"))
     } else {
