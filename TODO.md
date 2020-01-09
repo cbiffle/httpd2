@@ -2,8 +2,8 @@
 
 - Parse host from requests, serve different roots per host.
 
-- Serve gzipped alternates.
-
 - Customizable xtension to mimetype mapping.
 
+- Last modified dates
 
+- Logging

@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::io;
 use std::sync::Arc;
 use std::path::Path;
+use std::time::SystemTime;
 use std::ffi::OsStr;
 
 use hyper::{Body, Method, Request, Response, StatusCode};
@@ -51,7 +52,7 @@ impl From<io::Error> for ServeError {
 }
 
 enum FileOrDir {
-    File { file: fs::File, content_type: &'static str, len: u64 },
+    File { file: fs::File, content_type: &'static str, len: u64, modified: SystemTime, },
     Dir,
 }
 
@@ -68,6 +69,7 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
             file,
             content_type: map_content_type(path),
             len: meta.len(),
+            modified: meta.modified().unwrap(),
         })
     } else if meta.is_dir() {
         Ok(FileOrDir::Dir)
@@ -86,6 +88,19 @@ async fn picky_open_with_redirect(path: &mut String) -> Result<FileOrDir, io::Er
     }
 }
 
+async fn picky_open_with_redirect_and_gzip(path: &mut String) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
+    match picky_open_with_redirect(path).await? {
+        FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
+        FileOrDir::File { file, len, content_type, modified } => {
+            path.push_str(".gz");
+            match picky_open(Path::new(path)).await {
+                Ok(FileOrDir::File { file, len, modified: cmod, .. }) if cmod >= modified => Ok((FileOrDir::File { file, len, content_type, modified }, Some("gzip"))),
+                _ => Ok((FileOrDir::File {file, len, content_type, modified}, None)),
+            }
+        },
+    }
+}
+
 fn map_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(OsStr::to_str) {
         Some("html") => "text/html",
@@ -99,6 +114,16 @@ fn map_content_type(path: &Path) -> &'static str {
 
 async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
+
+    let mut accept_gzip = false;
+    for list in req.headers().get_all(hyper::header::ACCEPT_ENCODING).iter() {
+        if let Ok(list) = list.to_str() {
+            if list.split(",").any(|item| item.trim() == "gzip") {
+                accept_gzip = true;
+                break;
+            }
+        }
+    }
 
     match (req.method(), req.uri().path()) {
         (&Method::GET, path) => {
@@ -118,14 +143,22 @@ async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
             }
             println!("path: {}", sanitized);
 
-            match picky_open_with_redirect(&mut sanitized).await {
-                Ok(FileOrDir::File { file, content_type, len }) => {
+            let open_result = if accept_gzip {
+                picky_open_with_redirect_and_gzip(&mut sanitized).await
+            } else {
+                picky_open_with_redirect(&mut sanitized).await.map(|f| (f, None))
+            };
+            match open_result {
+                Ok((FileOrDir::File { file, content_type, len, modified }, enc)) => {
                     *response.body_mut() = Body::wrap_stream(
                     codec::BytesCodec::new()
                         .framed(file)
                         .map(|b| b.map(bytes::BytesMut::freeze)));
                     response.headers_mut().insert(hyper::header::CONTENT_LENGTH, len.into());
                     response.headers_mut().insert(hyper::header::CONTENT_TYPE, hyper::header::HeaderValue::from_static(content_type));
+                    if let Some(enc) = enc {
+                        response.headers_mut().insert(hyper::header::CONTENT_ENCODING, hyper::header::HeaderValue::from_static(enc));
+                    }
                 }
                 _ => {
                     *response.status_mut() = StatusCode::NOT_FOUND;
