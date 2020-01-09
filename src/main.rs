@@ -294,12 +294,15 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
 const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
 const DEFAULT_PORT: u16 = 8000;
 
-#[tokio::main]
-async fn main() {
-    use clap::value_t;
+struct Args {
+    root: std::path::PathBuf,
+    should_chroot: bool,
+    addr: SocketAddr,
+    uid: Option<nix::unistd::Uid>,
+    gid: Option<nix::unistd::Gid>,
+}
 
-    // Go ahead and parse arguments before dropping privileges, since they
-    // control whether we drop privileges, among other things.
+fn get_args() -> Result<Args, clap::Error> {
     let matches = clap::App::new("httpd2")
         .arg(
             clap::Arg::with_name("chroot")
@@ -317,6 +320,7 @@ async fn main() {
                 .long("addr")
                 .takes_value(true)
                 .value_name("ADDR:PORT")
+                .validator(is_sockaddr)
                 .help("Address and port to bind."),
         )
         .arg(
@@ -325,6 +329,7 @@ async fn main() {
                 .long("uid")
                 .takes_value(true)
                 .value_name("UID")
+                .validator(is_uid)
                 .help("User to switch to via setuid before serving."),
         )
         .arg(
@@ -333,6 +338,7 @@ async fn main() {
                 .long("gid")
                 .takes_value(true)
                 .value_name("GID")
+                .validator(is_gid)
                 .help("Group to switch to via setgid before serving."),
         )
         .arg(
@@ -343,19 +349,53 @@ async fn main() {
         )
         .get_matches();
 
-    let path = matches.value_of("DIR").unwrap();
+    fn is_uid(val: String) -> Result<(), String> {
+        val.parse::<libc::uid_t>()
+            .map(|_| ())
+            .map_err(|_| "can't parse as UID".to_string())
+    }
+
+    fn is_gid(val: String) -> Result<(), String> {
+        val.parse::<libc::uid_t>()
+            .map(|_| ())
+            .map_err(|_| "can't parse as GID".to_string())
+    }
+
+    fn is_sockaddr(val: String) -> Result<(), String> {
+        val.parse::<SocketAddr>()
+            .map(|_| ())
+            .map_err(|_| "can't parse as addr:port".to_string())
+    }
+
+    use clap::value_t;
+
+    let root = matches.value_of("DIR").unwrap();
     let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
     let addr = value_t!(matches, "addr", SocketAddr)
         .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
-    let uid = if let Some(uid) = matches.value_of("uid") {
-        Some(uid.parse::<libc::uid_t>().expect("bad UID value"))
-    } else {
-        None
-    };
-    let gid = if let Some(gid) = matches.value_of("gid") {
-        Some(gid.parse::<libc::gid_t>().expect("bad GID value"))
-    } else {
-        None
+    println!("{:?}", addr);
+
+    let uid = matches.value_of("uid")
+        .map(|uid| nix::unistd::Uid::from_raw(uid.parse::<libc::uid_t>().unwrap()));
+    let gid = matches.value_of("gid")
+        .map(|gid| nix::unistd::Gid::from_raw(gid.parse::<libc::gid_t>().unwrap()));
+
+    Ok(Args {
+        root: std::path::PathBuf::from(root),
+        should_chroot,
+        addr,
+        uid,
+        gid,
+    })
+}
+
+#[tokio::main]
+async fn main() {
+    // Go ahead and parse arguments before dropping privileges, since they
+    // control whether we drop privileges, among other things.
+    let args = match get_args() {
+        Ok(args) => args,
+        Err(e) => e.exit(),
     };
 
     // Things that need to get done while root:
@@ -376,23 +416,21 @@ async fn main() {
     ))
     .expect("can't load cert");
 
-    let mut listener = tokio::net::TcpListener::bind(&addr)
+    let mut listener = tokio::net::TcpListener::bind(&args.addr)
         .await
         .expect("Could not bind");
 
     // Beginning to drop privileges here
 
-    std::env::set_current_dir(&path).expect("can't cwd");
-    if should_chroot {
-        nix::unistd::chroot(&*path).expect("can't chroot");
+    std::env::set_current_dir(&args.root).expect("can't cwd");
+    if args.should_chroot {
+        nix::unistd::chroot(&args.root).expect("can't chroot");
     }
-    if let Some(gid) = gid {
-        let gid = nix::unistd::Gid::from_raw(gid);
+    if let Some(gid) = args.gid {
         nix::unistd::setgid(gid).expect("can't setgid");
         nix::unistd::setgroups(&[gid]).expect("can't setgid");
     }
-    if let Some(uid) = uid {
-        let uid = nix::unistd::Uid::from_raw(uid);
+    if let Some(uid) = args.uid {
         nix::unistd::setuid(uid).expect("can't setuid");
     }
 
