@@ -24,6 +24,8 @@ enum ServeError {
     Io(io::Error),
     /// Errors in the Nix syscall interface.
     Nix(nix::Error),
+    /// Errors in the TLS subsystem.
+    Tls(rustls::TLSError),
 }
 
 impl std::fmt::Display for ServeError {
@@ -32,6 +34,7 @@ impl std::fmt::Display for ServeError {
             ServeError::Hyper(e) => write!(f, "{}", e),
             ServeError::Io(e) => write!(f, "{}", e),
             ServeError::Nix(e) => write!(f, "{}", e),
+            ServeError::Tls(e) => write!(f, "{}", e),
         }
     }
 }
@@ -42,7 +45,14 @@ impl std::error::Error for ServeError {
             ServeError::Hyper(e) => Some(e),
             ServeError::Io(e) => Some(e),
             ServeError::Nix(e) => Some(e),
+            ServeError::Tls(e) => Some(e),
         }
+    }
+}
+
+impl From<rustls::TLSError> for ServeError {
+    fn from(x: rustls::TLSError) -> Self {
+        ServeError::Tls(x)
     }
 }
 
@@ -438,8 +448,7 @@ fn drop_privs(args: &Args) -> Result<(), ServeError> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
+async fn start() -> Result<(), ServeError> {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let args = match get_args() {
@@ -452,22 +461,17 @@ async fn main() {
     // - Reading SSL private key.
     // - Chrooting.
 
-    let (key, cert_chain) = load_key_and_cert()
-        .expect("can't load key/cert");
+    let (key, cert_chain) = load_key_and_cert()?;
 
-    let mut listener = tokio::net::TcpListener::bind(&args.addr)
-        .await
-        .expect("Could not bind");
+    let mut listener = tokio::net::TcpListener::bind(&args.addr).await?;
 
     // Dropping privileges here...
-    drop_privs(&args)
-        .expect("failure dropping privileges");
+    drop_privs(&args)?;
 
     let tls_acceptor = {
         let mut config = ServerConfig::new(NoClientAuth::new());
         config
-            .set_single_cert(cert_chain, key)
-            .expect("can't set cert");
+            .set_single_cert(cert_chain, key)?;
         config.versions =
             vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -497,4 +501,11 @@ async fn main() {
             eprintln!("error accepting");
         }
     }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    start().await.expect("server failed")
 }
