@@ -232,80 +232,87 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     }
 
     // Process GET requests.
-    if let (&Method::GET, path) = (req.method(), req.uri().path()) {
-        // Sanitize the path using a derivative of publicfile's algorithm.
-        // It appears that Hyper blocks non-ASCII characters.
-        // Allocate enough room for a path that doesn't require sanitization,
-        // plus the initial dot-slash.
-        let mut sanitized = String::with_capacity(path.len() + 2);
-        sanitized.push_str("./");
+    let method = req.method();
+    match (method, req.uri().path()) {
+        (&Method::GET, path) | (&Method::HEAD, path) => {
+            // Sanitize the path using a derivative of publicfile's algorithm.
+            // It appears that Hyper blocks non-ASCII characters.
+            // Allocate enough room for a path that doesn't require
+            // sanitization, plus the initial dot-slash.
+            let mut sanitized = String::with_capacity(path.len() + 2);
+            sanitized.push_str("./");
 
-        // Transfer characters one at a time.
-        for c in path.chars() {
-            match c {
-                // Squash NUL to underscore.
-                '\0' => sanitized.push('_'),
-                // Drop duplicate slashes.
-                '/' if sanitized.ends_with("/") => (),
-                // Add one dot to any dot after slash to avoid traversal.
-                '.' if sanitized.ends_with("/") => sanitized.push(':'),
-                // Otherwise, fine, we'll give it a try.
-                _ => sanitized.push(c),
-            }
-        }
-        println!("path: {}", sanitized);
-
-        // Select content encoding.
-        let open_result = if accept_gzip {
-            picky_open_with_redirect_and_gzip(&mut sanitized).await
-        } else {
-            picky_open_with_redirect(&mut sanitized)
-                .await
-                .map(|f| (f, None))
-        };
-
-        match open_result {
-            Ok((
-                FileOrDir::File {
-                    file,
-                    content_type,
-                    len,
-                    ..
-                },
-                enc,
-            )) => {
-                *response.body_mut() = Body::wrap_stream(
-                    codec::BytesCodec::new()
-                        .framed(file)
-                        .map(|b| b.map(bytes::BytesMut::freeze)),
-                );
-                response
-                    .headers_mut()
-                    .insert(hyper::header::CONTENT_LENGTH, len.into());
-                response.headers_mut().insert(
-                    hyper::header::CONTENT_TYPE,
-                    hyper::header::HeaderValue::from_static(content_type),
-                );
-                if let Some(enc) = enc {
-                    response.headers_mut().insert(
-                        hyper::header::CONTENT_ENCODING,
-                        hyper::header::HeaderValue::from_static(enc),
-                    );
+            // Transfer characters one at a time.
+            for c in path.chars() {
+                match c {
+                    // Squash NUL to underscore.
+                    '\0' => sanitized.push('_'),
+                    // Drop duplicate slashes.
+                    '/' if sanitized.ends_with("/") => (),
+                    // Add one dot to any dot after slash to avoid traversal.
+                    '.' if sanitized.ends_with("/") => sanitized.push(':'),
+                    // Otherwise, fine, we'll give it a try.
+                    _ => sanitized.push(c),
                 }
             }
-            _ => {
-                // To avoid disclosing information, we signal any other case as
-                // 404. Cases covered here include:
-                // - Actual file not found.
-                // - Permissions did not permit file to be served.
-                // - One level of directory redirect followed, but still found a
-                //   directory.
-                *response.status_mut() = StatusCode::NOT_FOUND;
+            println!("path: {}", sanitized);
+
+            // Select content encoding.
+            let open_result = if accept_gzip {
+                picky_open_with_redirect_and_gzip(&mut sanitized).await
+            } else {
+                picky_open_with_redirect(&mut sanitized)
+                    .await
+                    .map(|f| (f, None))
+            };
+
+            match open_result {
+                Ok((
+                        FileOrDir::File {
+                            file,
+                            content_type,
+                            len,
+                            ..
+                        },
+                        enc,
+                )) => {
+                    response
+                        .headers_mut()
+                        .insert(hyper::header::CONTENT_LENGTH, len.into());
+                    response.headers_mut().insert(
+                        hyper::header::CONTENT_TYPE,
+                        hyper::header::HeaderValue::from_static(content_type),
+                    );
+                    if let Some(enc) = enc {
+                        response.headers_mut().insert(
+                            hyper::header::CONTENT_ENCODING,
+                            hyper::header::HeaderValue::from_static(enc),
+                        );
+                    }
+
+                    if method == Method::GET {
+                        *response.body_mut() = Body::wrap_stream(
+                            codec::BytesCodec::new()
+                            .framed(file)
+                            .map(|b| b.map(bytes::BytesMut::freeze)),
+                        );
+                    }
+                }
+                _ => {
+                    // To avoid disclosing information, we signal any other case
+                    // as 404. Cases covered here include:
+                    // - Actual file not found.
+                    // - Permissions did not permit file to be served.
+                    // - One level of directory redirect followed, but still
+                    //   found a directory.
+                    *response.status_mut() = StatusCode::NOT_FOUND;
+                }
             }
         }
-    } else {
-        // Any other request method falls here.
-        *response.status_mut() = StatusCode::NOT_FOUND;
+        _ => {
+            // Any other request method falls here.
+            *response.status_mut() = StatusCode::NOT_FOUND;
+        }
     }
 
     Ok(response)

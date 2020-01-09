@@ -7,5 +7,3 @@
 - Last modified dates
 
 - Logging
-
-- HEAD
