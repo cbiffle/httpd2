@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::io;
 use std::sync::Arc;
 use std::path::Path;
+use std::ffi::OsStr;
 
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::service::{service_fn};
@@ -50,7 +51,7 @@ impl From<io::Error> for ServeError {
 }
 
 enum FileOrDir {
-    File { file: fs::File, len: u64 },
+    File { file: fs::File, content_type: &'static str, len: u64 },
     Dir,
 }
 
@@ -63,7 +64,11 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
     if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
         Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
     } else if meta.is_file() { 
-        Ok(FileOrDir::File { file, len: meta.len() })
+        Ok(FileOrDir::File {
+            file,
+            content_type: map_content_type(path),
+            len: meta.len(),
+        })
     } else if meta.is_dir() {
         Ok(FileOrDir::Dir)
     } else {
@@ -78,6 +83,13 @@ async fn picky_open_with_redirect(path: &mut String) -> Result<FileOrDir, io::Er
             picky_open(Path::new(path)).await
         },
         r => Ok(r),
+    }
+}
+
+fn map_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(OsStr::to_str) {
+        Some("html") => "text/html",
+        _ => "text/plain",
     }
 }
 
@@ -103,14 +115,13 @@ async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
             println!("path: {}", sanitized);
 
             match picky_open_with_redirect(&mut sanitized).await {
-                Ok(FileOrDir::File { file, len }) => {
+                Ok(FileOrDir::File { file, content_type, len }) => {
                     *response.body_mut() = Body::wrap_stream(
                     codec::BytesCodec::new()
                         .framed(file)
                         .map(|b| b.map(bytes::BytesMut::freeze)));
                     response.headers_mut().insert(hyper::header::CONTENT_LENGTH, len.into());
-
-
+                    response.headers_mut().insert(hyper::header::CONTENT_TYPE, hyper::header::HeaderValue::from_static(content_type));
                 }
                 _ => {
                     *response.status_mut() = StatusCode::NOT_FOUND;
