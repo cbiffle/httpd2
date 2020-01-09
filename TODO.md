@@ -1,7 +1,3 @@
-- CWD before chroot
-
-- Drop privileges using setuid/setgid/setgroups
-
 - Serve normal files.
 
 - Implement percent decoding and sanitization.
