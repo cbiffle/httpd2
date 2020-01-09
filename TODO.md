@@ -4,6 +4,6 @@
 
 - Customizable xtension to mimetype mapping.
 
-- Last modified dates
-
 - Logging
+
+- If Modified Since

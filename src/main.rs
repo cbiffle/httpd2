@@ -272,21 +272,28 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
                             file,
                             content_type,
                             len,
-                            ..
+                            modified,
                         },
                         enc,
                 )) => {
+                    use hyper::header::HeaderValue;
+
                     response
                         .headers_mut()
                         .insert(hyper::header::CONTENT_LENGTH, len.into());
                     response.headers_mut().insert(
                         hyper::header::CONTENT_TYPE,
-                        hyper::header::HeaderValue::from_static(content_type),
+                        HeaderValue::from_static(content_type),
+                    );
+                    response.headers_mut().insert(
+                        hyper::header::LAST_MODIFIED,
+                        HeaderValue::from_str(
+                            &httpdate::fmt_http_date(modified)).unwrap(),
                     );
                     if let Some(enc) = enc {
                         response.headers_mut().insert(
                             hyper::header::CONTENT_ENCODING,
-                            hyper::header::HeaderValue::from_static(enc),
+                            HeaderValue::from_static(enc),
                         );
                     }
 
