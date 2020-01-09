@@ -1,23 +1,121 @@
 use std::net::SocketAddr;
-use std::fs;
 use std::io;
 use std::sync::Arc;
+use std::path::Path;
 
 use hyper::{Body, Method, Request, Response, StatusCode};
-use hyper::error::Error;
 use hyper::service::{service_fn};
 
 use rustls::{NoClientAuth, ServerConfig, ProtocolVersion};
 
 use tokio::stream::StreamExt;
+use tokio::fs;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::codec::{self, Decoder};
 
-async fn hello_world(req: Request<Body>) -> Result<Response<Body>, Error> {
+#[derive(Debug)]
+enum ServeError {
+    Hyper(hyper::Error),
+    Io(io::Error),
+}
+
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ServeError::Hyper(e) => write!(f, "{}", e),
+            ServeError::Io(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for ServeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ServeError::Hyper(e) => Some(e),
+            ServeError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<hyper::Error> for ServeError {
+    fn from(x: hyper::Error) -> Self {
+        ServeError::Hyper(x)
+    }
+}
+
+impl From<io::Error> for ServeError {
+    fn from(x: io::Error) -> Self {
+        ServeError::Io(x)
+    }
+}
+
+enum FileOrDir {
+    File { file: fs::File, len: u64 },
+    Dir,
+}
+
+async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let file = fs::File::open(path).await?;
+    let meta = file.metadata().await?;
+    let mode = meta.permissions().mode();
+
+    if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
+        Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
+    } else if meta.is_file() { 
+        Ok(FileOrDir::File { file, len: meta.len() })
+    } else if meta.is_dir() {
+        Ok(FileOrDir::Dir)
+    } else {
+        Err(io::Error::new(io::ErrorKind::NotFound, "type"))
+    }
+}
+
+async fn picky_open_with_redirect(path: &mut String) -> Result<FileOrDir, io::Error> {
+    match picky_open(Path::new(path)).await? {
+        FileOrDir::Dir => {
+            path.push_str("/index.html");
+            picky_open(Path::new(path)).await
+        },
+        r => Ok(r),
+    }
+}
+
+async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
 
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => {
-            *response.body_mut() = Body::from("try POSTing data to /echo");
+        (&Method::GET, path) => {
+            let mut sanitized = String::with_capacity(path.len() + 1);
+            sanitized.push_str("./");
+            for c in path.chars() {
+                match c {
+                    // Squash NUL to underscore.
+                    '\0' => sanitized.push('_'),
+                    // Drop duplicate slashes.
+                    '/' if sanitized.ends_with("/") => (),
+                    // Add one dot to any dot after slash to avoid traversal.
+                    '.' if sanitized.ends_with("/") => sanitized.push(':'),
+                    // Otherwise, fine, we'll give it a try.
+                    _ => sanitized.push(c),
+                }
+            }
+            println!("path: {}", sanitized);
+
+            match picky_open_with_redirect(&mut sanitized).await {
+                Ok(FileOrDir::File { file, len }) => {
+                    *response.body_mut() = Body::wrap_stream(
+                    codec::BytesCodec::new()
+                        .framed(file)
+                        .map(|b| b.map(bytes::BytesMut::freeze)));
+                    response.headers_mut().insert(hyper::header::CONTENT_LENGTH, len.into());
+
+
+                }
+                _ => {
+                    *response.status_mut() = StatusCode::NOT_FOUND;
+                }
+            }
         }
         _ => {
             *response.status_mut() = StatusCode::NOT_FOUND;
@@ -86,12 +184,12 @@ async fn main() {
 
     let key = rustls::internal::pemfile::pkcs8_private_keys(
         &mut io::BufReader::new(
-            fs::File::open("localhost.key").expect("can't open localhost.key")
+            std::fs::File::open("localhost.key").expect("can't open localhost.key")
         )
     ).expect("can't load key").pop().expect("no keys?");
     let cert_chain = rustls::internal::pemfile::certs(
         &mut io::BufReader::new(
-            fs::File::open("localhost.crt").expect("can't open localhost.crt")
+            std::fs::File::open("localhost.crt").expect("can't open localhost.crt")
         )
     ).expect("can't load cert");
 
