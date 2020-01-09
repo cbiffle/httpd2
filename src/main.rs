@@ -268,13 +268,13 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
 
             match open_result {
                 Ok((
-                        FileOrDir::File {
-                            file,
-                            content_type,
-                            len,
-                            modified,
-                        },
-                        enc,
+                    FileOrDir::File {
+                        file,
+                        content_type,
+                        len,
+                        modified,
+                    },
+                    enc,
                 )) => {
                     use hyper::header::HeaderValue;
 
@@ -287,8 +287,10 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
                     );
                     response.headers_mut().insert(
                         hyper::header::LAST_MODIFIED,
-                        HeaderValue::from_str(
-                            &httpdate::fmt_http_date(modified)).unwrap(),
+                        HeaderValue::from_str(&httpdate::fmt_http_date(
+                            modified,
+                        ))
+                        .unwrap(),
                     );
                     if let Some(enc) = enc {
                         response.headers_mut().insert(
@@ -300,8 +302,8 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
                     if method == Method::GET {
                         *response.body_mut() = Body::wrap_stream(
                             codec::BytesCodec::new()
-                            .framed(file)
-                            .map(|b| b.map(bytes::BytesMut::freeze)),
+                                .framed(file)
+                                .map(|b| b.map(bytes::BytesMut::freeze)),
                         );
                     }
                 }
@@ -409,10 +411,12 @@ fn get_args() -> Result<Args, clap::Error> {
         .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
     println!("{:?}", addr);
 
-    let uid = matches.value_of("uid")
-        .map(|uid| nix::unistd::Uid::from_raw(uid.parse::<libc::uid_t>().unwrap()));
-    let gid = matches.value_of("gid")
-        .map(|gid| nix::unistd::Gid::from_raw(gid.parse::<libc::gid_t>().unwrap()));
+    let uid = matches.value_of("uid").map(|uid| {
+        nix::unistd::Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())
+    });
+    let gid = matches.value_of("gid").map(|gid| {
+        nix::unistd::Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())
+    });
 
     Ok(Args {
         root: std::path::PathBuf::from(root),
@@ -423,27 +427,30 @@ fn get_args() -> Result<Args, clap::Error> {
     })
 }
 
-fn load_key_and_cert() -> io::Result<(rustls::PrivateKey, Vec<rustls::Certificate>)> {
-    let key =
-        rustls::internal::pemfile::pkcs8_private_keys(&mut io::BufReader::new(
-            std::fs::File::open("localhost.key")?
-        ))
-        .map_err(|_| io::Error::new(
-                io::ErrorKind::Other,
-                "can't load private key (bad file?)",
-        ))?
-        .pop()
-        .ok_or_else(|| io::Error::new(
-                io::ErrorKind::Other,
-                "no keys found in private key file",
-        ))?;
+fn load_key_and_cert(
+) -> io::Result<(rustls::PrivateKey, Vec<rustls::Certificate>)> {
+    let key = rustls::internal::pemfile::pkcs8_private_keys(
+        &mut io::BufReader::new(std::fs::File::open("localhost.key")?),
+    )
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "can't load private key (bad file?)",
+        )
+    })?
+    .pop()
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "no keys found in private key file",
+        )
+    })?;
     let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
-        std::fs::File::open("localhost.crt")?
+        std::fs::File::open("localhost.crt")?,
     ))
-        .map_err(|_| io::Error::new(
-                io::ErrorKind::Other,
-                "can't load certificate",
-        ))?;
+    .map_err(|_| {
+        io::Error::new(io::ErrorKind::Other, "can't load certificate")
+    })?;
     Ok((key, cert_chain))
 }
 
@@ -484,8 +491,7 @@ async fn start() -> Result<(), ServeError> {
 
     let tls_acceptor = {
         let mut config = ServerConfig::new(NoClientAuth::new());
-        config
-            .set_single_cert(cert_chain, key)?;
+        config.set_single_cert(cert_chain, key)?;
         config.versions =
             vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
