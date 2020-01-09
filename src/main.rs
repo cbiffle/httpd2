@@ -89,6 +89,10 @@ async fn picky_open_with_redirect(path: &mut String) -> Result<FileOrDir, io::Er
 fn map_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(OsStr::to_str) {
         Some("html") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
+        Some("woff2") => "font/woff2",
+        Some("png") => "image/png",
         _ => "text/plain",
     }
 }
