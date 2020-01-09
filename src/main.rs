@@ -1,23 +1,26 @@
-use std::net::SocketAddr;
-use std::io;
-use std::sync::Arc;
-use std::path::Path;
-use std::time::SystemTime;
 use std::ffi::OsStr;
+use std::io;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::SystemTime;
 
+use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use hyper::service::{service_fn};
 
-use rustls::{NoClientAuth, ServerConfig, ProtocolVersion};
+use rustls::{NoClientAuth, ProtocolVersion, ServerConfig};
 
-use tokio::stream::StreamExt;
 use tokio::fs;
+use tokio::stream::StreamExt;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{self, Decoder};
 
+/// Error union type for the server.
 #[derive(Debug)]
 enum ServeError {
+    /// Errors coming from within Hyper.
     Hyper(hyper::Error),
+    /// I/O-related errors.
     Io(io::Error),
 }
 
@@ -51,11 +54,39 @@ impl From<io::Error> for ServeError {
     }
 }
 
+/// Possible successful results from the `picky_open` family of operations.
 enum FileOrDir {
-    File { file: fs::File, content_type: &'static str, len: u64, modified: SystemTime, },
+    /// We found a regular file, with permissions set such that we're willing to
+    /// admit it exists.
+    File {
+        /// An async handle to the file, open for read.
+        file: fs::File,
+        /// The file's inferred content type.
+        content_type: &'static str,
+        /// Length of the file in bytes.
+        len: u64,
+        /// Modification timestamp.
+        modified: SystemTime,
+    },
+    /// We found a directory.
     Dir,
 }
 
+/// Accesses a path for file serving, if it meets certain narrow criteria.
+///
+/// This operation is critical to the correctness of the server. It is careful
+/// in several respects:
+///
+/// 1. To avoid TOCTOU issues, it opens files first and checks their metadata
+///    second.
+///
+/// 2. Only files that are user/group/world readable are acknowledged to exist.
+///
+/// 3. Files that are world-X but not user-X are rejected, for reasons inherited
+///    from publicfile that I don't quite recall.
+///
+/// If the path turns out to be a directory, returns `FileOrDir::Dir` only if it
+/// meets all the above criteria.
 async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
     use std::os::unix::fs::PermissionsExt;
     let file = fs::File::open(path).await?;
@@ -64,7 +95,7 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
 
     if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
         Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
-    } else if meta.is_file() { 
+    } else if meta.is_file() {
         Ok(FileOrDir::File {
             file,
             content_type: map_content_type(path),
@@ -78,29 +109,82 @@ async fn picky_open(path: &Path) -> Result<FileOrDir, io::Error> {
     }
 }
 
-async fn picky_open_with_redirect(path: &mut String) -> Result<FileOrDir, io::Error> {
+/// Extends `picky_open` with directory redirect handling.
+///
+/// If `path` turns out to be a directory, this routine will retry the
+/// `picky_open` to search for an `index.html` file within that directory. If
+/// the `index.html` has the appropriate permissions and is a regular file, the
+/// open operation succeeds, returning its contents.
+async fn picky_open_with_redirect(
+    path: &mut String,
+) -> Result<FileOrDir, io::Error> {
     match picky_open(Path::new(path)).await? {
         FileOrDir::Dir => {
             path.push_str("/index.html");
             picky_open(Path::new(path)).await
-        },
+        }
         r => Ok(r),
     }
 }
 
-async fn picky_open_with_redirect_and_gzip(path: &mut String) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
+/// Extends `picky_open_with_redirect` with selection of precompressed
+/// alternate files.
+///
+/// When `picky_open_with_redirect` finds a readable regular file at `path`,
+/// this routine will retry to search for a compressed version of the file with
+/// the same name and the `.gz` extension appended. If the compressed version
+/// exists, passes `picky_open`'s criteria, *and* has a last-modified date at
+/// least as recent as the original file, then it is substituted.
+///
+/// Importantly, the content-type judgment for the *original*, non-compressed
+/// file, is preserved.
+///
+/// Returns the normal `FileOrDir` result, plus an optional `Content-Encoding`
+/// value if an alternate encoding was selected.
+async fn picky_open_with_redirect_and_gzip(
+    path: &mut String,
+) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
     match picky_open_with_redirect(path).await? {
         FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
-        FileOrDir::File { file, len, content_type, modified } => {
+        FileOrDir::File {
+            file,
+            len,
+            content_type,
+            modified,
+        } => {
             path.push_str(".gz");
             match picky_open(Path::new(path)).await {
-                Ok(FileOrDir::File { file, len, modified: cmod, .. }) if cmod >= modified => Ok((FileOrDir::File { file, len, content_type, modified }, Some("gzip"))),
-                _ => Ok((FileOrDir::File {file, len, content_type, modified}, None)),
+                Ok(FileOrDir::File {
+                    file,
+                    len,
+                    modified: cmod,
+                    ..
+                }) if cmod >= modified => Ok((
+                    FileOrDir::File {
+                        file,
+                        len,
+                        content_type,
+                        modified,
+                    },
+                    Some("gzip"),
+                )),
+                _ => Ok((
+                    FileOrDir::File {
+                        file,
+                        len,
+                        content_type,
+                        modified,
+                    },
+                    None,
+                )),
             }
-        },
+        }
     }
 }
 
+/// Guesses the `Content-Type` of a file based on its path.
+///
+/// Currently, this is hardcoded based on file extensions, like we're Windows.
 fn map_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(OsStr::to_str) {
         Some("html") => "text/html",
@@ -112,9 +196,11 @@ fn map_content_type(path: &Path) -> &'static str {
     }
 }
 
-async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
+/// Attempts to serve a file in response to `req`.
+async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
 
+    // Scan the request headers to see if gzip compressed responses are OK.
     let mut accept_gzip = false;
     for list in req.headers().get_all(hyper::header::ACCEPT_ENCODING).iter() {
         if let Ok(list) = list.to_str() {
@@ -125,49 +211,81 @@ async fn hello_world(req: Request<Body>) -> Result<Response<Body>, ServeError> {
         }
     }
 
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, path) => {
-            let mut sanitized = String::with_capacity(path.len() + 1);
-            sanitized.push_str("./");
-            for c in path.chars() {
-                match c {
-                    // Squash NUL to underscore.
-                    '\0' => sanitized.push('_'),
-                    // Drop duplicate slashes.
-                    '/' if sanitized.ends_with("/") => (),
-                    // Add one dot to any dot after slash to avoid traversal.
-                    '.' if sanitized.ends_with("/") => sanitized.push(':'),
-                    // Otherwise, fine, we'll give it a try.
-                    _ => sanitized.push(c),
-                }
-            }
-            println!("path: {}", sanitized);
+    // Process GET requests.
+    if let (&Method::GET, path) = (req.method(), req.uri().path()) {
+        // Sanitize the path using a derivative of publicfile's algorithm.
+        // It appears that Hyper blocks non-ASCII characters.
+        // Allocate enough room for a path that doesn't require sanitization,
+        // plus the initial dot-slash.
+        let mut sanitized = String::with_capacity(path.len() + 2);
+        sanitized.push_str("./");
 
-            let open_result = if accept_gzip {
-                picky_open_with_redirect_and_gzip(&mut sanitized).await
-            } else {
-                picky_open_with_redirect(&mut sanitized).await.map(|f| (f, None))
-            };
-            match open_result {
-                Ok((FileOrDir::File { file, content_type, len, modified }, enc)) => {
-                    *response.body_mut() = Body::wrap_stream(
+        // Transfer characters one at a time.
+        for c in path.chars() {
+            match c {
+                // Squash NUL to underscore.
+                '\0' => sanitized.push('_'),
+                // Drop duplicate slashes.
+                '/' if sanitized.ends_with("/") => (),
+                // Add one dot to any dot after slash to avoid traversal.
+                '.' if sanitized.ends_with("/") => sanitized.push(':'),
+                // Otherwise, fine, we'll give it a try.
+                _ => sanitized.push(c),
+            }
+        }
+        println!("path: {}", sanitized);
+
+        // Select content encoding.
+        let open_result = if accept_gzip {
+            picky_open_with_redirect_and_gzip(&mut sanitized).await
+        } else {
+            picky_open_with_redirect(&mut sanitized)
+                .await
+                .map(|f| (f, None))
+        };
+
+        match open_result {
+            Ok((
+                FileOrDir::File {
+                    file,
+                    content_type,
+                    len,
+                    ..
+                },
+                enc,
+            )) => {
+                *response.body_mut() = Body::wrap_stream(
                     codec::BytesCodec::new()
                         .framed(file)
-                        .map(|b| b.map(bytes::BytesMut::freeze)));
-                    response.headers_mut().insert(hyper::header::CONTENT_LENGTH, len.into());
-                    response.headers_mut().insert(hyper::header::CONTENT_TYPE, hyper::header::HeaderValue::from_static(content_type));
-                    if let Some(enc) = enc {
-                        response.headers_mut().insert(hyper::header::CONTENT_ENCODING, hyper::header::HeaderValue::from_static(enc));
-                    }
-                }
-                _ => {
-                    *response.status_mut() = StatusCode::NOT_FOUND;
+                        .map(|b| b.map(bytes::BytesMut::freeze)),
+                );
+                response
+                    .headers_mut()
+                    .insert(hyper::header::CONTENT_LENGTH, len.into());
+                response.headers_mut().insert(
+                    hyper::header::CONTENT_TYPE,
+                    hyper::header::HeaderValue::from_static(content_type),
+                );
+                if let Some(enc) = enc {
+                    response.headers_mut().insert(
+                        hyper::header::CONTENT_ENCODING,
+                        hyper::header::HeaderValue::from_static(enc),
+                    );
                 }
             }
+            _ => {
+                // To avoid disclosing information, we signal any other case as
+                // 404. Cases covered here include:
+                // - Actual file not found.
+                // - Permissions did not permit file to be served.
+                // - One level of directory redirect followed, but still found a
+                //   directory.
+                *response.status_mut() = StatusCode::NOT_FOUND;
+            }
         }
-        _ => {
-            *response.status_mut() = StatusCode::NOT_FOUND;
-        }
+    } else {
+        // Any other request method falls here.
+        *response.status_mut() = StatusCode::NOT_FOUND;
     }
 
     Ok(response)
@@ -180,40 +298,52 @@ async fn main() {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let matches = clap::App::new("httpd2")
-        .arg(clap::Arg::with_name("chroot")
-            .short("c")
-            .long("chroot")
-            .help("Specifies that the server should chroot into DIR. You\n\
-                   basically always want this, unless you're running the\n\
-                   server as an unprivileged user."))
-        .arg(clap::Arg::with_name("addr")
-            .short("A")
-            .long("addr")
-            .takes_value(true)
-            .value_name("ADDR:PORT")
-            .help("Address and port to bind."))
-        .arg(clap::Arg::with_name("uid")
-            .short("U")
-            .long("uid")
-            .takes_value(true)
-            .value_name("UID")
-            .help("User to switch to via setuid before serving."))
-        .arg(clap::Arg::with_name("gid")
-            .short("G")
-            .long("gid")
-            .takes_value(true)
-            .value_name("GID")
-            .help("Group to switch to via setgid before serving."))
-        .arg(clap::Arg::with_name("DIR")
-            .help("Path to serve")
-            .required(true)
-            .index(1))
+        .arg(
+            clap::Arg::with_name("chroot")
+                .short("c")
+                .long("chroot")
+                .help(
+                    "Specifies that the server should chroot into DIR. You\n\
+                     basically always want this, unless you're running the\n\
+                     server as an unprivileged user.",
+                ),
+        )
+        .arg(
+            clap::Arg::with_name("addr")
+                .short("A")
+                .long("addr")
+                .takes_value(true)
+                .value_name("ADDR:PORT")
+                .help("Address and port to bind."),
+        )
+        .arg(
+            clap::Arg::with_name("uid")
+                .short("U")
+                .long("uid")
+                .takes_value(true)
+                .value_name("UID")
+                .help("User to switch to via setuid before serving."),
+        )
+        .arg(
+            clap::Arg::with_name("gid")
+                .short("G")
+                .long("gid")
+                .takes_value(true)
+                .value_name("GID")
+                .help("Group to switch to via setgid before serving."),
+        )
+        .arg(
+            clap::Arg::with_name("DIR")
+                .help("Path to serve")
+                .required(true)
+                .index(1),
+        )
         .get_matches();
 
     let path = matches.value_of("DIR").unwrap();
     let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
     let addr = value_t!(matches, "addr", SocketAddr)
-        .unwrap_or(SocketAddr::from(([0,0,0,0], 8000)));
+        .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 8000)));
     let uid = if let Some(uid) = matches.value_of("uid") {
         Some(uid.parse::<libc::uid_t>().expect("bad UID value"))
     } else {
@@ -230,16 +360,18 @@ async fn main() {
     // - Reading SSL private key.
     // - Chrooting.
 
-    let key = rustls::internal::pemfile::pkcs8_private_keys(
-        &mut io::BufReader::new(
-            std::fs::File::open("localhost.key").expect("can't open localhost.key")
-        )
-    ).expect("can't load key").pop().expect("no keys?");
-    let cert_chain = rustls::internal::pemfile::certs(
-        &mut io::BufReader::new(
-            std::fs::File::open("localhost.crt").expect("can't open localhost.crt")
-        )
-    ).expect("can't load cert");
+    let key =
+        rustls::internal::pemfile::pkcs8_private_keys(&mut io::BufReader::new(
+            std::fs::File::open("localhost.key")
+                .expect("can't open localhost.key"),
+        ))
+        .expect("can't load key")
+        .pop()
+        .expect("no keys?");
+    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
+        std::fs::File::open("localhost.crt").expect("can't open localhost.crt"),
+    ))
+    .expect("can't load cert");
 
     let mut listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -264,14 +396,15 @@ async fn main() {
     // All privileges dropped.
 
     let mut config = ServerConfig::new(NoClientAuth::new());
-    config.set_single_cert(cert_chain, key).expect("can't set cert");
+    config
+        .set_single_cert(cert_chain, key)
+        .expect("can't set cert");
     config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(config));
 
     let http = hyper::server::conn::Http::new();
-    // TODO settings here
 
     let mut incoming = listener.incoming();
     while let Some(stream) = incoming.next().await {
@@ -280,7 +413,9 @@ async fn main() {
             let http = http.clone();
             tokio::spawn(async move {
                 if let Ok(stream) = tls_acceptor.accept(socket).await {
-                    let r = http.serve_connection(stream, service_fn(hello_world)).await;
+                    let r = http
+                        .serve_connection(stream, service_fn(serve_files))
+                        .await;
                     match r {
                         Ok(_) => (),
                         Err(e) => eprintln!("error in connection: {}", e),
