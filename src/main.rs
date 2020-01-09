@@ -22,6 +22,8 @@ enum ServeError {
     Hyper(hyper::Error),
     /// I/O-related errors.
     Io(io::Error),
+    /// Errors in the Nix syscall interface.
+    Nix(nix::Error),
 }
 
 impl std::fmt::Display for ServeError {
@@ -29,6 +31,7 @@ impl std::fmt::Display for ServeError {
         match self {
             ServeError::Hyper(e) => write!(f, "{}", e),
             ServeError::Io(e) => write!(f, "{}", e),
+            ServeError::Nix(e) => write!(f, "{}", e),
         }
     }
 }
@@ -38,6 +41,7 @@ impl std::error::Error for ServeError {
         match self {
             ServeError::Hyper(e) => Some(e),
             ServeError::Io(e) => Some(e),
+            ServeError::Nix(e) => Some(e),
         }
     }
 }
@@ -45,6 +49,12 @@ impl std::error::Error for ServeError {
 impl From<hyper::Error> for ServeError {
     fn from(x: hyper::Error) -> Self {
         ServeError::Hyper(x)
+    }
+}
+
+impl From<nix::Error> for ServeError {
+    fn from(x: nix::Error) -> Self {
+        ServeError::Nix(x)
     }
 }
 
@@ -389,6 +399,45 @@ fn get_args() -> Result<Args, clap::Error> {
     })
 }
 
+fn load_key_and_cert() -> io::Result<(rustls::PrivateKey, Vec<rustls::Certificate>)> {
+    let key =
+        rustls::internal::pemfile::pkcs8_private_keys(&mut io::BufReader::new(
+            std::fs::File::open("localhost.key")?
+        ))
+        .map_err(|_| io::Error::new(
+                io::ErrorKind::Other,
+                "can't load private key (bad file?)",
+        ))?
+        .pop()
+        .ok_or_else(|| io::Error::new(
+                io::ErrorKind::Other,
+                "no keys found in private key file",
+        ))?;
+    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
+        std::fs::File::open("localhost.crt")?
+    ))
+        .map_err(|_| io::Error::new(
+                io::ErrorKind::Other,
+                "can't load certificate",
+        ))?;
+    Ok((key, cert_chain))
+}
+
+fn drop_privs(args: &Args) -> Result<(), ServeError> {
+    std::env::set_current_dir(&args.root)?;
+    if args.should_chroot {
+        nix::unistd::chroot(&args.root)?;
+    }
+    if let Some(gid) = args.gid {
+        nix::unistd::setgid(gid)?;
+        nix::unistd::setgroups(&[gid])?;
+    }
+    if let Some(uid) = args.uid {
+        nix::unistd::setuid(uid)?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // Go ahead and parse arguments before dropping privileges, since they
@@ -403,48 +452,27 @@ async fn main() {
     // - Reading SSL private key.
     // - Chrooting.
 
-    let key =
-        rustls::internal::pemfile::pkcs8_private_keys(&mut io::BufReader::new(
-            std::fs::File::open("localhost.key")
-                .expect("can't open localhost.key"),
-        ))
-        .expect("can't load key")
-        .pop()
-        .expect("no keys?");
-    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
-        std::fs::File::open("localhost.crt").expect("can't open localhost.crt"),
-    ))
-    .expect("can't load cert");
+    let (key, cert_chain) = load_key_and_cert()
+        .expect("can't load key/cert");
 
     let mut listener = tokio::net::TcpListener::bind(&args.addr)
         .await
         .expect("Could not bind");
 
-    // Beginning to drop privileges here
+    // Dropping privileges here...
+    drop_privs(&args)
+        .expect("failure dropping privileges");
 
-    std::env::set_current_dir(&args.root).expect("can't cwd");
-    if args.should_chroot {
-        nix::unistd::chroot(&args.root).expect("can't chroot");
-    }
-    if let Some(gid) = args.gid {
-        nix::unistd::setgid(gid).expect("can't setgid");
-        nix::unistd::setgroups(&[gid]).expect("can't setgid");
-    }
-    if let Some(uid) = args.uid {
-        nix::unistd::setuid(uid).expect("can't setuid");
-    }
-
-    // All privileges dropped.
-
-    let mut config = ServerConfig::new(NoClientAuth::new());
-    config
-        .set_single_cert(cert_chain, key)
-        .expect("can't set cert");
-    config.versions = vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-    let tls_acceptor = TlsAcceptor::from(Arc::new(config));
-
+    let tls_acceptor = {
+        let mut config = ServerConfig::new(NoClientAuth::new());
+        config
+            .set_single_cert(cert_chain, key)
+            .expect("can't set cert");
+        config.versions =
+            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        TlsAcceptor::from(Arc::new(config))
+    };
     let http = hyper::server::conn::Http::new();
 
     let mut incoming = listener.incoming();
