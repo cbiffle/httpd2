@@ -216,6 +216,27 @@ fn map_content_type(path: &Path) -> &'static str {
     }
 }
 
+fn sanitize_path(path: &str) -> String {
+    let mut sanitized = String::with_capacity(path.len() + 2);
+    sanitized.push_str("./");
+
+    // Transfer characters one at a time.
+    for c in path.chars() {
+        match c {
+            // Squash NUL to underscore.
+            '\0' => sanitized.push('_'),
+            // Drop duplicate slashes.
+            '/' if sanitized.ends_with("/") => (),
+            // Add one dot to any dot after slash to avoid traversal.
+            '.' if sanitized.ends_with("/") => sanitized.push(':'),
+            // Otherwise, fine, we'll give it a try.
+            _ => sanitized.push(c),
+        }
+    }
+
+    sanitized
+}
+
 /// Attempts to serve a file in response to `req`.
 async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
@@ -239,22 +260,7 @@ async fn serve_files(req: Request<Body>) -> Result<Response<Body>, ServeError> {
             // It appears that Hyper blocks non-ASCII characters.
             // Allocate enough room for a path that doesn't require
             // sanitization, plus the initial dot-slash.
-            let mut sanitized = String::with_capacity(path.len() + 2);
-            sanitized.push_str("./");
-
-            // Transfer characters one at a time.
-            for c in path.chars() {
-                match c {
-                    // Squash NUL to underscore.
-                    '\0' => sanitized.push('_'),
-                    // Drop duplicate slashes.
-                    '/' if sanitized.ends_with("/") => (),
-                    // Add one dot to any dot after slash to avoid traversal.
-                    '.' if sanitized.ends_with("/") => sanitized.push(':'),
-                    // Otherwise, fine, we'll give it a try.
-                    _ => sanitized.push(c),
-                }
-            }
+            let mut sanitized = sanitize_path(path);
             println!("path: {}", sanitized);
 
             // Select content encoding.
