@@ -1,22 +1,23 @@
 mod percent;
 mod traversal;
+mod picky;
 
 use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-use std::time::SystemTime;
 
 use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, StatusCode};
 
 use rustls::{NoClientAuth, ProtocolVersion, ServerConfig};
 
-use tokio::fs;
 use tokio::stream::StreamExt;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{self, Decoder};
+
+use self::picky::FileOrDir;
 
 /// Error union type for the server.
 #[derive(Debug)]
@@ -77,72 +78,7 @@ impl From<io::Error> for ServeError {
     }
 }
 
-/// Possible successful results from the `picky_open` family of operations.
-enum FileOrDir {
-    /// We found a regular file, with permissions set such that we're willing to
-    /// admit it exists.
-    File {
-        /// An async handle to the file, open for read.
-        file: fs::File,
-        /// The file's inferred content type.
-        content_type: &'static str,
-        /// Length of the file in bytes.
-        len: u64,
-        /// Modification timestamp.
-        modified: SystemTime,
-    },
-    /// We found a directory.
-    Dir,
-}
-
-/// Accesses a path for file serving, if it meets certain narrow criteria.
-///
-/// This operation is critical to the correctness of the server. It is careful
-/// in several respects:
-///
-/// 1. To avoid TOCTOU issues, it opens files first and checks their metadata
-///    second.
-///
-/// 2. Only files that are user/group/world readable are acknowledged to exist.
-///
-/// 3. Files that are world-X but not user-X are rejected, for reasons inherited
-///    from publicfile that I don't quite recall.
-///
-/// If the path turns out to be a directory, returns `FileOrDir::Dir` only if it
-/// meets all the above criteria.
-async fn picky_open(log: &slog::Logger, path: &Path) -> Result<FileOrDir, io::Error> {
-    slog::debug!(log, "picky_open({:?})", path);
-
-    use std::os::unix::fs::PermissionsExt;
-    let file = fs::File::open(path).await
-        .map_err(|e| {
-            slog::debug!(log, "can't open: {}", e);
-            e
-        })?;
-    let meta = file.metadata().await?;
-    let mode = meta.permissions().mode();
-
-    if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
-        slog::debug!(log, "mode {:#o} is not OK", mode);
-        Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
-    } else if meta.is_file() {
-        slog::debug!(log, "opened");
-        Ok(FileOrDir::File {
-            file,
-            content_type: map_content_type(path),
-            len: meta.len(),
-            modified: meta.modified().unwrap(),
-        })
-    } else if meta.is_dir() {
-        slog::debug!(log, "found dir");
-        Ok(FileOrDir::Dir)
-    } else {
-        slog::debug!(log, "neither file nor dir");
-        Err(io::Error::new(io::ErrorKind::NotFound, "type"))
-    }
-}
-
-/// Extends `picky_open` with directory redirect handling.
+/// Extends `picky::open` with directory redirect handling.
 ///
 /// If `path` turns out to be a directory, this routine will retry the
 /// `picky_open` to search for an `index.html` file within that directory. If
@@ -152,11 +88,11 @@ async fn picky_open_with_redirect(
     log: &slog::Logger,
     path: &mut String,
 ) -> Result<FileOrDir, io::Error> {
-    match picky_open(log, Path::new(path)).await? {
+    match picky::open(log, Path::new(path), map_content_type).await? {
         FileOrDir::Dir => {
             slog::debug!(log, "--> index.html");
             path.push_str("/index.html");
-            picky_open(log, Path::new(path)).await
+            picky::open(log, Path::new(path), map_content_type).await
         }
         r => Ok(r),
     }
@@ -182,43 +118,18 @@ async fn picky_open_with_redirect_and_gzip(
 ) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
     match picky_open_with_redirect(log, path).await? {
         FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
-        FileOrDir::File {
-            file,
-            len,
-            content_type,
-            modified,
-        } => {
+        FileOrDir::File(file) => {
             slog::debug!(log, "checking for precompressed alternate");
             path.push_str(".gz");
-            match picky_open(log, Path::new(path)).await {
-                Ok(FileOrDir::File {
-                    file,
-                    len,
-                    modified: cmod,
-                    ..
-                }) if cmod >= modified => {
+            // Note that we're "inferring" the old content-type.
+            match picky::open(log, Path::new(path), |_| file.content_type).await {
+                Ok(FileOrDir::File(cfile)) if cfile.modified >= file.modified => {
                     slog::debug!(log, "serving gzip");
-                    Ok((
-                        FileOrDir::File {
-                            file,
-                            len,
-                            content_type,
-                            modified,
-                        },
-                        Some("gzip"),
-                    ))
+                    Ok((FileOrDir::File(cfile), Some("gzip")))
                 },
                 _ => {
                     slog::debug!(log, "serving uncompressed");
-                    Ok((
-                        FileOrDir::File {
-                            file,
-                            len,
-                            content_type,
-                            modified,
-                        },
-                        None,
-                    ))
+                    Ok((FileOrDir::File(file), None))
                 }
             }
         }
@@ -279,28 +190,20 @@ async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<B
             };
 
             match open_result {
-                Ok((
-                    FileOrDir::File {
-                        file,
-                        content_type,
-                        len,
-                        modified,
-                    },
-                    enc,
-                )) => {
+                Ok((FileOrDir::File(file), enc)) => {
                     use hyper::header::HeaderValue;
 
                     response
                         .headers_mut()
-                        .insert(hyper::header::CONTENT_LENGTH, len.into());
+                        .insert(hyper::header::CONTENT_LENGTH, file.len.into());
                     response.headers_mut().insert(
                         hyper::header::CONTENT_TYPE,
-                        HeaderValue::from_static(content_type),
+                        HeaderValue::from_static(file.content_type),
                     );
                     response.headers_mut().insert(
                         hyper::header::LAST_MODIFIED,
                         HeaderValue::from_str(&httpdate::fmt_http_date(
-                            modified,
+                            file.modified,
                         ))
                         .unwrap(),
                     );
@@ -312,10 +215,10 @@ async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<B
                     }
 
                     if method == Method::GET {
-                        slog::info!(log, "OK: len={} encoding={:?}", len, enc);
+                        slog::info!(log, "OK: len={} encoding={:?}", file.len, enc);
                         *response.body_mut() = Body::wrap_stream(
                             codec::BytesCodec::new()
-                                .framed(file)
+                                .framed(file.file)
                                 .map(|b| b.map(bytes::BytesMut::freeze)),
                         );
                     }
