@@ -706,8 +706,8 @@ async fn main() {
     use slog::Drain;
 
     let decorator = slog_term::PlainDecorator::new(std::io::stderr());
-    let drain = slog_term::CompactFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
+    let drain = slog_term::FullFormat::new(decorator).use_original_order().build().fuse();
+    let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
     let log = slog::Logger::root(drain, slog::o!());
 
     start(log).await.expect("server failed")
