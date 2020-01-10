@@ -89,4 +89,24 @@ impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn decode_str(s: &str) -> String {
+        decode(s.chars()).collect()
+    }
+
+    #[test]
+    fn percent_decode() {
+        assert_eq!(decode_str(""), "");
+        assert_eq!(decode_str("%"), "%");
+        assert_eq!(decode_str("%%%"), "%%%");
+        assert_eq!(decode_str("%4"), "%4");
+        assert_eq!(decode_str("%41"), "A");
+        assert_eq!(decode_str("%4a"), "J");
+        assert_eq!(decode_str("%4A"), "J");
+        assert_eq!(decode_str("%4g"), "%4g");
+        assert_eq!(decode_str("%2525"), "%25");
+    }
+}

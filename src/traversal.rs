@@ -84,4 +84,22 @@ impl<I: Iterator<Item = char>> Iterator for Sanitizer<I> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    fn san_str(s: &str) -> String {
+        super::sanitize(s.chars()).collect()
+    }
 
+    #[test]
+    fn sanitize() {
+        assert_eq!(san_str(""), "./");
+        assert_eq!(san_str("///"), "./");
+        assert_eq!(san_str("."), "./:");
+        assert_eq!(san_str("/."), "./:");
+        assert_eq!(san_str(".."), "./:.");
+        assert_eq!(san_str("\0"), "./_");
+        assert_eq!(san_str("/\0"), "./_");
+
+        assert_eq!(san_str("//.././doc.pdf\0/"), "./:./:/doc.pdf_/");
+    }
+}

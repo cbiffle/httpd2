@@ -453,31 +453,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize() {
-        assert_eq!(sanitize_path(""), "./");
-        assert_eq!(sanitize_path("///"), "./");
-        assert_eq!(sanitize_path("."), "./:");
-        assert_eq!(sanitize_path("/."), "./:");
-        assert_eq!(sanitize_path(".."), "./:.");
-        assert_eq!(sanitize_path("\0"), "./_");
-        assert_eq!(sanitize_path("/\0"), "./_");
-
-        assert_eq!(sanitize_path("//.././doc.pdf\0/"), "./:./:/doc.pdf_/");
-    }
-
-    #[test]
-    fn percent_decode() {
-        assert_eq!(sanitize_path(""), "./");
-        assert_eq!(sanitize_path("%"), "./%");
-        assert_eq!(sanitize_path("%4"), "./%4");
-        assert_eq!(sanitize_path("%41"), "./A");
-        assert_eq!(sanitize_path("%4a"), "./J");
-        assert_eq!(sanitize_path("%4A"), "./J");
-        assert_eq!(sanitize_path("%4g"), "./%4g");
-        assert_eq!(sanitize_path("%2525"), "./%25");
-    }
-
-    #[test]
     fn percent_and_sanitize() {
         assert_eq!(sanitize_path("%2f"), "./");
         assert_eq!(sanitize_path("%2f%2F"), "./");
