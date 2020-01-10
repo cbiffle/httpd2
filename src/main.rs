@@ -1,155 +1,39 @@
+mod args;
 mod err;
 mod percent;
 mod picky;
 mod serve;
 mod traversal;
 
+use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
+use hyper::server::conn::Http;
 use hyper::service::service_fn;
+use hyper::{Body, Request, Response};
 
-use nix::unistd::{Gid, Uid};
+use nix::unistd::Uid;
 
-use rustls::{NoClientAuth, ProtocolVersion, ServerConfig};
+use rustls::{
+    Certificate, NoClientAuth, PrivateKey, ProtocolVersion, ServerConfig,
+};
 
+use tokio::net::TcpStream;
 use tokio::stream::StreamExt;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
+use self::args::{get_args, Args};
 use self::err::ServeError;
-
-const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
-const DEFAULT_PORT: u16 = 8000;
-
-struct Args {
-    root: std::path::PathBuf,
-    key_path: std::path::PathBuf,
-    cert_path: std::path::PathBuf,
-    should_chroot: bool,
-    addr: SocketAddr,
-    uid: Option<Uid>,
-    gid: Option<Gid>,
-}
-
-fn get_args() -> Result<Args, clap::Error> {
-    let matches = clap::App::new("httpd2")
-        .arg(
-            clap::Arg::with_name("chroot")
-                .short("c")
-                .long("chroot")
-                .help(
-                    "Specifies that the server should chroot into DIR. You\n\
-                     basically always want this, unless you're running the\n\
-                     server as an unprivileged user.",
-                ),
-        )
-        .arg(
-            clap::Arg::with_name("addr")
-                .short("A")
-                .long("addr")
-                .takes_value(true)
-                .value_name("ADDR:PORT")
-                .validator(is_sockaddr)
-                .help("Address and port to bind."),
-        )
-        .arg(
-            clap::Arg::with_name("uid")
-                .short("U")
-                .long("uid")
-                .takes_value(true)
-                .value_name("UID")
-                .validator(is_uid)
-                .help("User to switch to via setuid before serving."),
-        )
-        .arg(
-            clap::Arg::with_name("gid")
-                .short("G")
-                .long("gid")
-                .takes_value(true)
-                .value_name("GID")
-                .validator(is_gid)
-                .help("Group to switch to via setgid before serving."),
-        )
-        .arg(
-            clap::Arg::with_name("key_path")
-                .short("k")
-                .long("key-path")
-                .takes_value(true)
-                .value_name("PATH")
-                .default_value("localhost.key")
-                .help("Location of TLS private key."),
-        )
-        .arg(
-            clap::Arg::with_name("cert_path")
-                .short("r")
-                .long("cert-path")
-                .takes_value(true)
-                .value_name("PATH")
-                .default_value("localhost.crt")
-                .help("Location of TLS certificate."),
-        )
-        .arg(
-            clap::Arg::with_name("DIR")
-                .help("Path to serve")
-                .required(true)
-                .index(1),
-        )
-        .get_matches();
-
-    fn is_uid(val: String) -> Result<(), String> {
-        val.parse::<libc::uid_t>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as UID".to_string())
-    }
-
-    fn is_gid(val: String) -> Result<(), String> {
-        val.parse::<libc::uid_t>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as GID".to_string())
-    }
-
-    fn is_sockaddr(val: String) -> Result<(), String> {
-        val.parse::<SocketAddr>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as addr:port".to_string())
-    }
-
-    use clap::value_t;
-
-    let root = matches.value_of("DIR").unwrap();
-    let key_path = matches.value_of("key_path").unwrap();
-    let cert_path = matches.value_of("cert_path").unwrap();
-    let should_chroot = matches.is_present("chroot");
-    let addr = value_t!(matches, "addr", SocketAddr)
-        .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
-
-    let uid = matches.value_of("uid").map(|uid| {
-        Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())
-    });
-    let gid = matches.value_of("gid").map(|gid| {
-        Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())
-    });
-
-    Ok(Args {
-        root: std::path::PathBuf::from(root),
-        key_path: std::path::PathBuf::from(key_path),
-        cert_path: std::path::PathBuf::from(cert_path),
-        should_chroot,
-        addr,
-        uid,
-        gid,
-    })
-}
 
 fn load_key_and_cert(
     key_path: &Path,
     cert_path: &Path,
-) -> io::Result<(rustls::PrivateKey, Vec<rustls::Certificate>)> {
+) -> io::Result<(PrivateKey, Vec<Certificate>)> {
     let key = rustls::internal::pemfile::pkcs8_private_keys(
         &mut io::BufReader::new(std::fs::File::open(key_path)?),
     )
@@ -228,74 +112,125 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // Dropping privileges here...
     drop_privs(&log, &args)?;
 
-    let tls_acceptor = {
-        let mut config = ServerConfig::new(NoClientAuth::new());
-        config.set_single_cert(cert_chain, key)?;
-        config.versions =
-            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        TlsAcceptor::from(Arc::new(config))
-    };
-    let http = hyper::server::conn::Http::new();
+    let (tls_acceptor, http) = configure_server_bits(key, cert_chain)?;
 
     slog::info!(log, "serving {}", args.addr);
 
+    // Accept loop:
     let mut incoming = listener.incoming();
     let connection_counter = AtomicU64::new(0);
     while let Some(stream) = incoming.next().await {
         if let Ok(socket) = stream {
+            // New connection received. Add metadata to the logger.
             let log = log.new(slog::o!(
                 "peer" => socket.peer_addr()
                     .map(|sa| sa.to_string())
                     .unwrap_or_else(|_| "UNKNOWN".to_string()),
                 "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
             ));
+            // Clone the acceptor handle and HTTP config so they can be moved
+            // into the connection future below.
             let tls_acceptor = tls_acceptor.clone();
             let http = http.clone();
+            // Spawn the connection future.
             tokio::spawn(async move {
+                // Now that we're in the connection-specific task, do the actual
+                // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
-                    Ok(stream) => {
-                        use rustls::Session;
-
-                        let session = stream.get_ref().1;
-                        slog::debug!(
-                            log,
-                            "ALPN result: {:?}",
-                            std::str::from_utf8(
-                                session.get_alpn_protocol().unwrap_or(b"NONE")
-                            )
-                            .unwrap_or("BOGUS")
-                            .to_string()
-                        );
-                        let request_counter = AtomicU64::new(0);
-                        let r = http
-                            .serve_connection(
-                                stream,
-                                service_fn(|x| {
-                                    let log = log.new(slog::o!(
-                                        "rid" => request_counter
-                                            .fetch_add(1, Ordering::Relaxed),
-                                    ));
-                                    serve::files(log, x)
-                                }),
-                            )
-                            .await;
-                        if let Err(e) = r {
-                            slog::debug!(log, "error in connection: {}", e);
-                        }
-                        slog::info!(log, "connection closed");
-                    }
+                    Ok(stream) => serve_connection(log, http, stream).await,
                     Err(e) => {
+                        // TLS negotiation failed. In my observations so far,
+                        // this mostly happens when a client speaks HTTP (or
+                        // nonsense) to an HTTPS port.
                         slog::warn!(log, "error in TLS handshake: {}", e);
                     }
                 }
             });
         } else {
+            // Taking the next incoming connection from the socket failed. In
+            // practice, this means that the server is out of file descriptors.
             slog::warn!(log, "error accepting");
         }
     }
 
     Ok(())
+}
+
+/// Configure TLS and HTTP options for the server.
+fn configure_server_bits(
+    private_key: PrivateKey,
+    cert_chain: Vec<Certificate>,
+) -> Result<(TlsAcceptor, Http), ServeError> {
+    // Configure TLS and HTTP.
+    let tls_acceptor = {
+        // Don't require authentication.
+        let mut config = ServerConfig::new(NoClientAuth::new());
+        // We're using only this single identity.
+        config.set_single_cert(cert_chain, private_key)?;
+        // Prefer TLS1.3 but support 1.2.
+        config.versions =
+            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+        // Prefer HTTP/2 but support 1.1.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        TlsAcceptor::from(Arc::new(config))
+    };
+    // Currently Hyper's default configuration is fine with me.
+    let http = Http::new();
+
+    Ok((tls_acceptor, http))
+}
+
+async fn serve_connection(
+    log: slog::Logger,
+    http: Http,
+    stream: TlsStream<TcpStream>,
+) {
+    // Record the actual protocol we wound up using after
+    // ALPN.
+    {
+        use rustls::Session;
+
+        let session = stream.get_ref().1;
+        let protocol =
+            std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE"))
+                .unwrap_or("BOGUS")
+                .to_string();
+        slog::debug!(log, "ALPN result: {}", protocol);
+    }
+
+    // Begin handling requests. The request_counter tracks
+    // request IDs within this connection.
+    let request_counter = AtomicU64::new(0);
+    let r = http
+        .serve_connection(
+            stream,
+            service_fn(|x| handle_request(&log, &request_counter, x)),
+        )
+        .await;
+    if let Err(e) = r {
+        // In practice, there's always at least one of these
+        // at the end of the connection, and I haven't
+        // figured out a way to distinguish the typical
+        // cases from atypical -- so log at a low level.
+        slog::debug!(log, "error in connection: {}", e);
+    }
+    // This is for observing connection duration.
+    slog::info!(log, "connection closed");
+}
+
+fn handle_request(
+    log: &slog::Logger,
+    request_counter: &AtomicU64,
+    req: Request<Body>,
+) -> impl Future<Output = Result<Response<Body>, ServeError>> {
+    // Select a request ID and tag our logger with it.
+    serve::files(
+        log.new(slog::o!(
+            "rid" => request_counter
+            .fetch_add(1, Ordering::Relaxed),
+        )),
+        req,
+    )
 }
 
 #[tokio::main]
