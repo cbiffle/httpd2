@@ -1,3 +1,6 @@
+mod percent;
+mod traversal;
+
 use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
@@ -236,151 +239,8 @@ fn map_content_type(path: &Path) -> &'static str {
     }
 }
 
-struct Sanitizer<I> {
-    inner: I,
-    state: SanitizerState,
-}
-
-impl<I> From<I> for Sanitizer<I> {
-    fn from(inner: I) -> Self {
-        Self { inner, state: SanitizerState::EmitDot }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-enum SanitizerState {
-    EmitDot,
-    EmitSlash,
-    Normal,
-    Slash,
-}
-
-impl<I: Iterator<Item = char>> Iterator for Sanitizer<I> {
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.state {
-            SanitizerState::EmitDot => {
-                self.state = SanitizerState::EmitSlash;
-                return Some('.')
-            }
-            SanitizerState::EmitSlash => {
-                self.state = SanitizerState::Slash;
-                return Some('/')
-            }
-            _ => (),
-        }
-
-        loop {
-            match (self.state, self.inner.next()?) {
-                (_, '\0') => {
-                    self.state = SanitizerState::Normal;
-                    break Some('_')
-                }
-                (SanitizerState::Normal, '/') => {
-                    self.state = SanitizerState::Slash;
-                    break Some('/')
-                }
-                (SanitizerState::Slash, '/') => continue,
-                (SanitizerState::Slash, '.') => {
-                    self.state = SanitizerState::Normal;
-                    break Some(':')
-                }
-                (_, c) => {
-                    self.state = SanitizerState::Normal;
-                    break Some(c)
-                }
-            }
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // We alter the inner size-hint because it's possible that we discard
-        // all characters. The max length is extended by the initial dot-slash.
-        (0, self.inner.size_hint().1.map(|x| x + 2))
-    }
-}
-
-
 fn sanitize_path(path: &str) -> String {
-    Sanitizer::from(PercentDecoder::from(path.chars())).collect()
-}
-
-struct PercentDecoder<I> {
-    inner: I,
-    state: PercentState,
-}
-
-impl<I> From<I> for PercentDecoder<I> {
-    fn from(inner: I) -> Self {
-        Self {
-            inner,
-            state: PercentState::Normal,
-        }
-    }
-}
-
-enum PercentState {
-    /// Haven't seen a percent escape recently.
-    Normal,
-    /// A percent escape was found to be invalid on its final character. We have
-    /// yielded the original '%' and need to yield these additional characters
-    /// in sequence before touching `inner`.
-    Unspool2(char, char),
-    /// A percent escape was found to be invalid. We have yielded some portion
-    /// of it literally, and still need to yield this char before touching
-    /// `inner`.
-    Unspool(char),
-}
-
-impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        fn hexit(c: char) -> Option<u8> {
-            match c {
-                '0'..='9' => Some(c as u8 - '0' as u8),
-                'A'..='F' => Some(c as u8 - 'A' as u8 + 10),
-                'a'..='f' => Some(c as u8 - 'a' as u8 + 10),
-                _ => None,
-            }
-        }
-
-        match self.state {
-            PercentState::Normal => {
-                match self.inner.next()? {
-                    '%' => {
-                        if let Some(x) = self.inner.next() {
-                            if let Some(y) = self.inner.next() {
-                                if let (Some(x), Some(y)) = (hexit(x), hexit(y)) {
-                                    return Some((x << 4 | y) as char)
-                                } else {
-                                    self.state = PercentState::Unspool2(x, y);
-                                }
-                            } else {
-                                self.state = PercentState::Unspool(x);
-                            }
-                        }
-                        Some('%')
-                    }
-                    c => Some(c)
-                }
-            }
-            PercentState::Unspool2(x, y) => {
-                self.state = PercentState::Unspool(y);
-                Some(x)
-            }
-            PercentState::Unspool(y) => {
-                self.state = PercentState::Normal;
-                Some(y)
-            }
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let (min, max) = self.inner.size_hint();
-        (min / 3, max)
-    }
+    traversal::sanitize(percent::decode(path.chars())).collect()
 }
 
 /// Attempts to serve a file in response to `req`.
