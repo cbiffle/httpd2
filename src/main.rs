@@ -14,6 +14,8 @@ use std::sync::{
 
 use hyper::service::service_fn;
 
+use nix::unistd::{Gid, Uid};
+
 use rustls::{NoClientAuth, ProtocolVersion, ServerConfig};
 
 use tokio::stream::StreamExt;
@@ -30,8 +32,8 @@ struct Args {
     cert_path: std::path::PathBuf,
     should_chroot: bool,
     addr: SocketAddr,
-    uid: Option<nix::unistd::Uid>,
-    gid: Option<nix::unistd::Gid>,
+    uid: Option<Uid>,
+    gid: Option<Gid>,
 }
 
 fn get_args() -> Result<Args, clap::Error> {
@@ -122,16 +124,15 @@ fn get_args() -> Result<Args, clap::Error> {
     let root = matches.value_of("DIR").unwrap();
     let key_path = matches.value_of("key_path").unwrap();
     let cert_path = matches.value_of("cert_path").unwrap();
-    let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
+    let should_chroot = matches.is_present("chroot");
     let addr = value_t!(matches, "addr", SocketAddr)
         .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
-    println!("{:?}", addr);
 
     let uid = matches.value_of("uid").map(|uid| {
-        nix::unistd::Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())
+        Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())
     });
     let gid = matches.value_of("gid").map(|gid| {
-        nix::unistd::Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())
+        Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())
     });
 
     Ok(Args {
@@ -174,17 +175,22 @@ fn load_key_and_cert(
     Ok((key, cert_chain))
 }
 
-fn drop_privs(args: &Args) -> Result<(), ServeError> {
+fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
     std::env::set_current_dir(&args.root)?;
+    slog::info!(log, "cwd: {:?}", args.root);
+
     if args.should_chroot {
         nix::unistd::chroot(&args.root)?;
+        slog::info!(log, "in chroot");
     }
     if let Some(gid) = args.gid {
         nix::unistd::setgid(gid)?;
         nix::unistd::setgroups(&[gid])?;
+        slog::info!(log, "gid: {}", gid);
     }
     if let Some(uid) = args.uid {
         nix::unistd::setuid(uid)?;
+        slog::info!(log, "uid: {}", uid);
     }
     Ok(())
 }
@@ -197,6 +203,19 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
         Err(e) => e.exit(),
     };
 
+    // Sanity check configuration.
+    let root = Uid::from_raw(0);
+    if Uid::current() == root {
+        if !args.should_chroot {
+            eprintln!("Running as root without chroot?!");
+            std::process::exit(1);
+        }
+        if args.uid.is_none() || args.uid == Some(root) {
+            eprintln!("Provide a lower privileged user ID with -U <uid>");
+            std::process::exit(1);
+        }
+    }
+
     // Things that need to get done while root:
     // - Binding to privileged ports.
     // - Reading SSL private key.
@@ -207,7 +226,7 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     let mut listener = tokio::net::TcpListener::bind(&args.addr).await?;
 
     // Dropping privileges here...
-    drop_privs(&args)?;
+    drop_privs(&log, &args)?;
 
     let tls_acceptor = {
         let mut config = ServerConfig::new(NoClientAuth::new());
@@ -218,6 +237,8 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
         TlsAcceptor::from(Arc::new(config))
     };
     let http = hyper::server::conn::Http::new();
+
+    slog::info!(log, "serving {}", args.addr);
 
     let mut incoming = listener.incoming();
     let connection_counter = AtomicU64::new(0);
