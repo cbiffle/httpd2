@@ -467,11 +467,11 @@ async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<B
                 // - One level of directory redirect followed, but still
                 //   found a directory.
                 Ok(_) => {
-                    slog::warn!(log, "failed: would serve directory");
+                    slog::info!(log, "failed: would serve directory");
                     *response.status_mut() = StatusCode::NOT_FOUND;
                 }
                 Err(e) => {
-                    slog::warn!(log, "failed: {}", e);
+                    slog::info!(log, "failed: {}", e);
                     *response.status_mut() = StatusCode::NOT_FOUND;
                 }
             }
