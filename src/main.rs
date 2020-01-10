@@ -490,6 +490,8 @@ const DEFAULT_PORT: u16 = 8000;
 
 struct Args {
     root: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+    cert_path: std::path::PathBuf,
     should_chroot: bool,
     addr: SocketAddr,
     uid: Option<nix::unistd::Uid>,
@@ -536,6 +538,24 @@ fn get_args() -> Result<Args, clap::Error> {
                 .help("Group to switch to via setgid before serving."),
         )
         .arg(
+            clap::Arg::with_name("key_path")
+                .short("k")
+                .long("key-path")
+                .takes_value(true)
+                .value_name("PATH")
+                .default_value("localhost.key")
+                .help("Location of TLS private key."),
+        )
+        .arg(
+            clap::Arg::with_name("cert_path")
+                .short("r")
+                .long("cert-path")
+                .takes_value(true)
+                .value_name("PATH")
+                .default_value("localhost.crt")
+                .help("Location of TLS certificate."),
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -564,6 +584,8 @@ fn get_args() -> Result<Args, clap::Error> {
     use clap::value_t;
 
     let root = matches.value_of("DIR").unwrap();
+    let key_path = matches.value_of("key_path").unwrap();
+    let cert_path = matches.value_of("cert_path").unwrap();
     let should_chroot = value_t!(matches, "chroot", bool).unwrap_or(false);
     let addr = value_t!(matches, "addr", SocketAddr)
         .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
@@ -578,6 +600,8 @@ fn get_args() -> Result<Args, clap::Error> {
 
     Ok(Args {
         root: std::path::PathBuf::from(root),
+        key_path: std::path::PathBuf::from(key_path),
+        cert_path: std::path::PathBuf::from(cert_path),
         should_chroot,
         addr,
         uid,
@@ -586,9 +610,11 @@ fn get_args() -> Result<Args, clap::Error> {
 }
 
 fn load_key_and_cert(
+    key_path: &Path,
+    cert_path: &Path,
 ) -> io::Result<(rustls::PrivateKey, Vec<rustls::Certificate>)> {
     let key = rustls::internal::pemfile::pkcs8_private_keys(
-        &mut io::BufReader::new(std::fs::File::open("localhost.key")?),
+        &mut io::BufReader::new(std::fs::File::open(key_path)?),
     )
     .map_err(|_| {
         io::Error::new(
@@ -604,7 +630,7 @@ fn load_key_and_cert(
         )
     })?;
     let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
-        std::fs::File::open("localhost.crt")?,
+        std::fs::File::open(cert_path)?,
     ))
     .map_err(|_| {
         io::Error::new(io::ErrorKind::Other, "can't load certificate")
@@ -640,7 +666,10 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // - Reading SSL private key.
     // - Chrooting.
 
-    let (key, cert_chain) = load_key_and_cert()?;
+    let (key, cert_chain) = load_key_and_cert(
+        &args.key_path,
+        &args.cert_path,
+    )?;
 
     let mut listener = tokio::net::TcpListener::bind(&args.addr).await?;
 
