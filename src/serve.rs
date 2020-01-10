@@ -204,4 +204,3 @@ mod tests {
         assert_eq!(sanitize_path("%2f%2e%2e%00"), "./:._");
     }
 }
-

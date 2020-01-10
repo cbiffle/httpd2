@@ -1,8 +1,8 @@
 mod err;
 mod percent;
 mod picky;
-mod traversal;
 mod serve;
+mod traversal;
 
 use std::io;
 use std::net::SocketAddr;
@@ -224,7 +224,9 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     while let Some(stream) = incoming.next().await {
         if let Ok(socket) = stream {
             let log = log.new(slog::o!(
-                "peer" => socket.peer_addr().map(|sa| sa.to_string()).unwrap_or_else(|_| "UNKNOWN".to_string()),
+                "peer" => socket.peer_addr()
+                    .map(|sa| sa.to_string())
+                    .unwrap_or_else(|_| "UNKNOWN".to_string()),
                 "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
             ));
             let tls_acceptor = tls_acceptor.clone();
@@ -246,13 +248,17 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
                         );
                         let request_counter = AtomicU64::new(0);
                         let r = http
-                        .serve_connection(stream, service_fn(|x| {
-                            let log = log.new(slog::o!(
-                                "rid" => request_counter.fetch_add(1, Ordering::Relaxed),
-                            ));
-                            serve::files(log, x)
-                        }))
-                        .await;
+                            .serve_connection(
+                                stream,
+                                service_fn(|x| {
+                                    let log = log.new(slog::o!(
+                                        "rid" => request_counter
+                                            .fetch_add(1, Ordering::Relaxed),
+                                    ));
+                                    serve::files(log, x)
+                                }),
+                            )
+                            .await;
                         if let Err(e) = r {
                             slog::debug!(log, "error in connection: {}", e);
                         }
