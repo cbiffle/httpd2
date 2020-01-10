@@ -1,13 +1,16 @@
 mod err;
 mod percent;
-mod traversal;
 mod picky;
+mod traversal;
 
 use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, StatusCode};
@@ -18,8 +21,8 @@ use tokio::stream::StreamExt;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{self, Decoder};
 
-use self::picky::FileOrDir;
 use self::err::ServeError;
+use self::picky::FileOrDir;
 
 /// Extends `picky::open` with directory redirect handling.
 ///
@@ -65,11 +68,14 @@ async fn picky_open_with_redirect_and_gzip(
             slog::debug!(log, "checking for precompressed alternate");
             path.push_str(".gz");
             // Note that we're "inferring" the old content-type.
-            match picky::open(log, Path::new(path), |_| file.content_type).await {
-                Ok(FileOrDir::File(cfile)) if cfile.modified >= file.modified => {
+            match picky::open(log, Path::new(path), |_| file.content_type).await
+            {
+                Ok(FileOrDir::File(cfile))
+                    if cfile.modified >= file.modified =>
+                {
                     slog::debug!(log, "serving gzip");
                     Ok((FileOrDir::File(cfile), Some("gzip")))
-                },
+                }
                 _ => {
                     slog::debug!(log, "serving uncompressed");
                     Ok((FileOrDir::File(file), None))
@@ -98,7 +104,10 @@ fn sanitize_path(path: &str) -> String {
 }
 
 /// Attempts to serve a file in response to `req`.
-async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<Body>, ServeError> {
+async fn serve_files(
+    log: slog::Logger,
+    req: Request<Body>,
+) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
 
     // Scan the request headers to see if gzip compressed responses are OK.
@@ -158,7 +167,12 @@ async fn serve_files(log: slog::Logger, req: Request<Body>) -> Result<Response<B
                     }
 
                     if method == Method::GET {
-                        slog::info!(log, "OK: len={} encoding={:?}", file.len, enc);
+                        slog::info!(
+                            log,
+                            "OK: len={} encoding={:?}",
+                            file.len,
+                            enc
+                        );
                         *response.body_mut() = Body::wrap_stream(
                             codec::BytesCodec::new()
                                 .framed(file.file)
@@ -372,10 +386,7 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // - Reading SSL private key.
     // - Chrooting.
 
-    let (key, cert_chain) = load_key_and_cert(
-        &args.key_path,
-        &args.cert_path,
-    )?;
+    let (key, cert_chain) = load_key_and_cert(&args.key_path, &args.cert_path)?;
 
     let mut listener = tokio::net::TcpListener::bind(&args.addr).await?;
 
@@ -404,13 +415,21 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
             let http = http.clone();
             tokio::spawn(async move {
                 match tls_acceptor.accept(socket).await {
-                Ok(stream) => {
-                    use rustls::Session;
+                    Ok(stream) => {
+                        use rustls::Session;
 
-                    let session = stream.get_ref().1;
-                    slog::debug!(log, "ALPN result: {:?}", std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE")).unwrap_or("BOGUS").to_string());
-                    let request_counter = AtomicU64::new(0);
-                    let r = http
+                        let session = stream.get_ref().1;
+                        slog::debug!(
+                            log,
+                            "ALPN result: {:?}",
+                            std::str::from_utf8(
+                                session.get_alpn_protocol().unwrap_or(b"NONE")
+                            )
+                            .unwrap_or("BOGUS")
+                            .to_string()
+                        );
+                        let request_counter = AtomicU64::new(0);
+                        let r = http
                         .serve_connection(stream, service_fn(|x| {
                             let log = log.new(slog::o!(
                                 "rid" => request_counter.fetch_add(1, Ordering::Relaxed),
@@ -418,15 +437,15 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
                             serve_files(log, x)
                         }))
                         .await;
-                    if let Err(e) = r {
-                        slog::debug!(log, "error in connection: {}", e);
+                        if let Err(e) = r {
+                            slog::debug!(log, "error in connection: {}", e);
+                        }
+                        slog::info!(log, "connection closed");
                     }
-                    slog::info!(log, "connection closed");
+                    Err(e) => {
+                        slog::warn!(log, "error in TLS handshake: {}", e);
+                    }
                 }
-                Err(e) => {
-                    slog::warn!(log, "error in TLS handshake: {}", e);
-                }
-            }
             });
         } else {
             slog::warn!(log, "error accepting");
@@ -441,7 +460,10 @@ async fn main() {
     use slog::Drain;
 
     let decorator = slog_term::PlainDecorator::new(std::io::stderr());
-    let drain = slog_term::FullFormat::new(decorator).use_original_order().build().fuse();
+    let drain = slog_term::FullFormat::new(decorator)
+        .use_original_order()
+        .build()
+        .fuse();
     let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
     let log = slog::Logger::root(drain, slog::o!());
 

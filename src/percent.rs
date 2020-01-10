@@ -53,25 +53,23 @@ impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
         }
 
         match self.state {
-            PercentState::Normal => {
-                match self.inner.next()? {
-                    '%' => {
-                        if let Some(x) = self.inner.next() {
-                            if let Some(y) = self.inner.next() {
-                                if let (Some(x), Some(y)) = (hexit(x), hexit(y)) {
-                                    return Some((x << 4 | y) as char)
-                                } else {
-                                    self.state = PercentState::Unspool2(x, y);
-                                }
+            PercentState::Normal => match self.inner.next()? {
+                '%' => {
+                    if let Some(x) = self.inner.next() {
+                        if let Some(y) = self.inner.next() {
+                            if let (Some(x), Some(y)) = (hexit(x), hexit(y)) {
+                                return Some((x << 4 | y) as char);
                             } else {
-                                self.state = PercentState::Unspool(x);
+                                self.state = PercentState::Unspool2(x, y);
                             }
+                        } else {
+                            self.state = PercentState::Unspool(x);
                         }
-                        Some('%')
                     }
-                    c => Some(c)
+                    Some('%')
                 }
-            }
+                c => Some(c),
+            },
             PercentState::Unspool2(x, y) => {
                 self.state = PercentState::Unspool(y);
                 Some(x)

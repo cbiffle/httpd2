@@ -60,5 +60,3 @@ impl From<io::Error> for ServeError {
         ServeError::Io(x)
     }
 }
-
-

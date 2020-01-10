@@ -15,7 +15,9 @@
 //! steps, immediately before passing the path to the OS.
 
 /// Adapts `inner` to sanitize path names.
-pub fn sanitize(inner: impl Iterator<Item = char>) -> impl Iterator<Item = char> {
+pub fn sanitize(
+    inner: impl Iterator<Item = char>,
+) -> impl Iterator<Item = char> {
     Sanitizer::from(inner)
 }
 
@@ -26,7 +28,10 @@ struct Sanitizer<I> {
 
 impl<I> From<I> for Sanitizer<I> {
     fn from(inner: I) -> Self {
-        Self { inner, state: SanitizerState::EmitDot }
+        Self {
+            inner,
+            state: SanitizerState::EmitDot,
+        }
     }
 }
 
@@ -45,11 +50,11 @@ impl<I: Iterator<Item = char>> Iterator for Sanitizer<I> {
         match self.state {
             SanitizerState::EmitDot => {
                 self.state = SanitizerState::EmitSlash;
-                return Some('.')
+                return Some('.');
             }
             SanitizerState::EmitSlash => {
                 self.state = SanitizerState::Slash;
-                return Some('/')
+                return Some('/');
             }
             _ => (),
         }
@@ -58,20 +63,20 @@ impl<I: Iterator<Item = char>> Iterator for Sanitizer<I> {
             match (self.state, self.inner.next()?) {
                 (_, '\0') => {
                     self.state = SanitizerState::Normal;
-                    break Some('_')
+                    break Some('_');
                 }
                 (SanitizerState::Normal, '/') => {
                     self.state = SanitizerState::Slash;
-                    break Some('/')
+                    break Some('/');
                 }
                 (SanitizerState::Slash, '/') => continue,
                 (SanitizerState::Slash, '.') => {
                     self.state = SanitizerState::Normal;
-                    break Some(':')
+                    break Some(':');
                 }
                 (_, c) => {
                     self.state = SanitizerState::Normal;
-                    break Some(c)
+                    break Some(c);
                 }
             }
         }
