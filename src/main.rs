@@ -30,55 +30,26 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use self::args::{get_args, Args};
 use self::err::ServeError;
 
-fn load_key_and_cert(
-    key_path: &Path,
-    cert_path: &Path,
-) -> io::Result<(PrivateKey, Vec<Certificate>)> {
-    let key = rustls::internal::pemfile::pkcs8_private_keys(
-        &mut io::BufReader::new(std::fs::File::open(key_path)?),
-    )
-    .map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "can't load private key (bad file?)",
-        )
-    })?
-    .pop()
-    .ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "no keys found in private key file",
-        )
-    })?;
-    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
-        std::fs::File::open(cert_path)?,
-    ))
-    .map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "can't load certificate")
-    })?;
-    Ok((key, cert_chain))
+/// Main server entry point.
+#[tokio::main]
+async fn main() {
+    use slog::Drain;
+
+    // Produce boring plain text.
+    let decorator = slog_term::PlainDecorator::new(std::io::stderr());
+    // Pack everything onto one line, with the largest scope at left.
+    let drain = slog_term::FullFormat::new(decorator)
+        .use_original_order()
+        .build()
+        .fuse();
+    // Don't block the server until a bunch of records have built up.
+    let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
+    let log = slog::Logger::root(drain, slog::o!());
+
+    start(log).await.expect("server failed")
 }
 
-fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
-    std::env::set_current_dir(&args.root)?;
-    slog::info!(log, "cwd: {:?}", args.root);
-
-    if args.should_chroot {
-        nix::unistd::chroot(&args.root)?;
-        slog::info!(log, "in chroot");
-    }
-    if let Some(gid) = args.gid {
-        nix::unistd::setgid(gid)?;
-        nix::unistd::setgroups(&[gid])?;
-        slog::info!(log, "gid: {}", gid);
-    }
-    if let Some(uid) = args.uid {
-        nix::unistd::setuid(uid)?;
-        slog::info!(log, "uid: {}", uid);
-    }
-    Ok(())
-}
-
+/// Starts up a server.
 async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
@@ -156,30 +127,7 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     Ok(())
 }
 
-/// Configure TLS and HTTP options for the server.
-fn configure_server_bits(
-    private_key: PrivateKey,
-    cert_chain: Vec<Certificate>,
-) -> Result<(TlsAcceptor, Http), ServeError> {
-    // Configure TLS and HTTP.
-    let tls_acceptor = {
-        // Don't require authentication.
-        let mut config = ServerConfig::new(NoClientAuth::new());
-        // We're using only this single identity.
-        config.set_single_cert(cert_chain, private_key)?;
-        // Prefer TLS1.3 but support 1.2.
-        config.versions =
-            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
-        // Prefer HTTP/2 but support 1.1.
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        TlsAcceptor::from(Arc::new(config))
-    };
-    // Currently Hyper's default configuration is fine with me.
-    let http = Http::new();
-
-    Ok((tls_acceptor, http))
-}
-
+/// Connection handler. Returns a future that processes requests on `stream`.
 async fn serve_connection(
     log: slog::Logger,
     http: Http,
@@ -218,6 +166,7 @@ async fn serve_connection(
     slog::info!(log, "connection closed");
 }
 
+/// Request handler. This mostly defers to the `serve` module right now.
 fn handle_request(
     log: &slog::Logger,
     request_counter: &AtomicU64,
@@ -233,17 +182,78 @@ fn handle_request(
     )
 }
 
-#[tokio::main]
-async fn main() {
-    use slog::Drain;
+/// Loads TLS credentials from the filesystem using synchronous operations.
+fn load_key_and_cert(
+    key_path: &Path,
+    cert_path: &Path,
+) -> io::Result<(PrivateKey, Vec<Certificate>)> {
+    let key = rustls::internal::pemfile::pkcs8_private_keys(
+        &mut io::BufReader::new(std::fs::File::open(key_path)?),
+    )
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "can't load private key (bad file?)",
+        )
+    })?
+    .pop()
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "no keys found in private key file",
+        )
+    })?;
+    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
+        std::fs::File::open(cert_path)?,
+    ))
+    .map_err(|_| {
+        io::Error::new(io::ErrorKind::Other, "can't load certificate")
+    })?;
+    Ok((key, cert_chain))
+}
 
-    let decorator = slog_term::PlainDecorator::new(std::io::stderr());
-    let drain = slog_term::FullFormat::new(decorator)
-        .use_original_order()
-        .build()
-        .fuse();
-    let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
-    let log = slog::Logger::root(drain, slog::o!());
+/// Drops the set of privileges requested in `args`. At minimum, this changes
+/// the CWD; at most, it chroots and changes to an unprivileged user.
+fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
+    std::env::set_current_dir(&args.root)?;
+    slog::info!(log, "cwd: {:?}", args.root);
 
-    start(log).await.expect("server failed")
+    if args.should_chroot {
+        nix::unistd::chroot(&args.root)?;
+        slog::info!(log, "in chroot");
+    }
+    if let Some(gid) = args.gid {
+        nix::unistd::setgid(gid)?;
+        nix::unistd::setgroups(&[gid])?;
+        slog::info!(log, "gid: {}", gid);
+    }
+    if let Some(uid) = args.uid {
+        nix::unistd::setuid(uid)?;
+        slog::info!(log, "uid: {}", uid);
+    }
+    Ok(())
+}
+
+/// Configure TLS and HTTP options for the server.
+fn configure_server_bits(
+    private_key: PrivateKey,
+    cert_chain: Vec<Certificate>,
+) -> Result<(TlsAcceptor, Http), ServeError> {
+    // Configure TLS and HTTP.
+    let tls_acceptor = {
+        // Don't require authentication.
+        let mut config = ServerConfig::new(NoClientAuth::new());
+        // We're using only this single identity.
+        config.set_single_cert(cert_chain, private_key)?;
+        // Prefer TLS1.3 but support 1.2.
+        config.versions =
+            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+        // Prefer HTTP/2 but support 1.1.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        TlsAcceptor::from(Arc::new(config))
+    };
+    // Currently Hyper's default configuration is fine with me.
+    let http = Http::new();
+
+    Ok((tls_acceptor, http))
 }
