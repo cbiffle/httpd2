@@ -1,3 +1,4 @@
+mod err;
 mod percent;
 mod traversal;
 mod picky;
@@ -18,65 +19,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::{self, Decoder};
 
 use self::picky::FileOrDir;
-
-/// Error union type for the server.
-#[derive(Debug)]
-enum ServeError {
-    /// Errors coming from within Hyper.
-    Hyper(hyper::Error),
-    /// I/O-related errors.
-    Io(io::Error),
-    /// Errors in the Nix syscall interface.
-    Nix(nix::Error),
-    /// Errors in the TLS subsystem.
-    Tls(rustls::TLSError),
-}
-
-impl std::fmt::Display for ServeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ServeError::Hyper(e) => write!(f, "{}", e),
-            ServeError::Io(e) => write!(f, "{}", e),
-            ServeError::Nix(e) => write!(f, "{}", e),
-            ServeError::Tls(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for ServeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ServeError::Hyper(e) => Some(e),
-            ServeError::Io(e) => Some(e),
-            ServeError::Nix(e) => Some(e),
-            ServeError::Tls(e) => Some(e),
-        }
-    }
-}
-
-impl From<rustls::TLSError> for ServeError {
-    fn from(x: rustls::TLSError) -> Self {
-        ServeError::Tls(x)
-    }
-}
-
-impl From<hyper::Error> for ServeError {
-    fn from(x: hyper::Error) -> Self {
-        ServeError::Hyper(x)
-    }
-}
-
-impl From<nix::Error> for ServeError {
-    fn from(x: nix::Error) -> Self {
-        ServeError::Nix(x)
-    }
-}
-
-impl From<io::Error> for ServeError {
-    fn from(x: io::Error) -> Self {
-        ServeError::Io(x)
-    }
-}
+use self::err::ServeError;
 
 /// Extends `picky::open` with directory redirect handling.
 ///
