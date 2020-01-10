@@ -683,13 +683,8 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
                             serve_files(log, x)
                         }))
                         .await;
-                    match r {
-                        Ok(_) => (),
-                        Err(e) => {
-                            if !e.is_closed() && !e.is_canceled() {
-                                slog::warn!(log, "error in connection: {}", e);
-                            }
-                        }
+                    if let Err(e) = r {
+                        slog::debug!(log, "error in connection: {}", e);
                     }
                     slog::info!(log, "connection closed");
                 }
