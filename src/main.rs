@@ -27,7 +27,7 @@ use tokio::net::TcpStream;
 use tokio::stream::StreamExt;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
-use self::args::{get_args, Args};
+use self::args::{get_args, Args, Log};
 use self::err::ServeError;
 
 /// Main server entry point.
@@ -35,28 +35,40 @@ use self::err::ServeError;
 async fn main() {
     use slog::Drain;
 
-    // Produce boring plain text.
-    let decorator = slog_term::PlainDecorator::new(std::io::stderr());
-    // Pack everything onto one line, with the largest scope at left.
-    let drain = slog_term::FullFormat::new(decorator)
-        .use_original_order()
-        .build()
-        .fuse();
-    // Don't block the server until a bunch of records have built up.
-    let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
-    let log = slog::Logger::root(drain, slog::o!());
-
-    start(log).await.expect("server failed")
-}
-
-/// Starts up a server.
-async fn start(log: slog::Logger) -> Result<(), ServeError> {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let args = match get_args() {
         Ok(args) => args,
         Err(e) => e.exit(),
     };
+
+    let log = match args.log {
+        Log::Stderr => {
+            // Produce boring plain text.
+            let decorator = slog_term::PlainDecorator::new(std::io::stderr());
+            // Pack everything onto one line, with the largest scope at left.
+            let drain = slog_term::FullFormat::new(decorator)
+                .use_original_order()
+                .build()
+                .fuse();
+            // Don't block the server until a bunch of records have built up.
+            let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
+            slog::Logger::root(drain, slog::o!())
+        }
+        #[cfg(feature = "journald")]
+        Log::Journald => {
+            let drain = slog_journald::JournaldDrain.ignore_res();
+            // Don't block the server until a bunch of records have built up.
+            let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
+            slog::Logger::root(drain, slog::o!())
+        }
+    };
+
+    start(args, log).await.expect("server failed")
+}
+
+/// Starts up a server.
+async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 
     // Sanity check configuration.
     let root = Uid::from_raw(0);

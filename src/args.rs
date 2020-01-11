@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use clap::arg_enum;
 use nix::unistd::{Gid, Uid};
 
 const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
@@ -17,6 +18,25 @@ pub struct Args {
     pub gid: Option<Gid>,
     pub hsts: bool,
     pub upgrade: bool,
+    pub log: Log,
+}
+
+// TODO: looks like Clap's arg_enum doesn't allow variant attributes.
+#[cfg(not(feature = "journald"))]
+arg_enum! {
+    #[derive(Copy, Clone, Debug)]
+    pub enum Log {
+        Stderr,
+    }
+}
+
+#[cfg(feature = "journald")]
+arg_enum! {
+    #[derive(Copy, Clone, Debug)]
+    pub enum Log {
+        Stderr,
+        Journald,
+    }
 }
 
 pub fn get_args() -> Result<Args, clap::Error> {
@@ -87,6 +107,15 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .long("upgrade")
         )
         .arg(
+            clap::Arg::with_name("log")
+                .help("Selects a logging backend")
+                .long("log")
+                .short("l")
+                .possible_values(&Log::variants())
+                .default_value("stderr")
+                .case_insensitive(true)
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -130,6 +159,7 @@ pub fn get_args() -> Result<Args, clap::Error> {
 
     let hsts = matches.is_present("hsts");
     let upgrade = matches.is_present("upgrade");
+    let log = value_t!(matches, "log", Log).unwrap();
 
     Ok(Args {
         root: std::path::PathBuf::from(root),
@@ -141,6 +171,7 @@ pub fn get_args() -> Result<Args, clap::Error> {
         gid,
         hsts,
         upgrade,
+        log,
     })
 }
 
