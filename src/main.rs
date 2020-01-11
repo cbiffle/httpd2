@@ -84,6 +84,7 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
     drop_privs(&log, &args)?;
 
     let (tls_acceptor, http) = configure_server_bits(key, cert_chain)?;
+    let args = Arc::new(args);
 
     slog::info!(log, "serving {}", args.addr);
 
@@ -103,12 +104,13 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
             // into the connection future below.
             let tls_acceptor = tls_acceptor.clone();
             let http = http.clone();
+            let args = args.clone();
             // Spawn the connection future.
             tokio::spawn(async move {
                 // Now that we're in the connection-specific task, do the actual
                 // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
-                    Ok(stream) => serve_connection(log, http, stream).await,
+                    Ok(stream) => serve_connection(args, log, http, stream).await,
                     Err(e) => {
                         // TLS negotiation failed. In my observations so far,
                         // this mostly happens when a client speaks HTTP (or
@@ -129,6 +131,7 @@ async fn start(log: slog::Logger) -> Result<(), ServeError> {
 
 /// Connection handler. Returns a future that processes requests on `stream`.
 async fn serve_connection(
+    args: Arc<Args>,
     log: slog::Logger,
     http: Http,
     stream: TlsStream<TcpStream>,
@@ -152,7 +155,7 @@ async fn serve_connection(
     let r = http
         .serve_connection(
             stream,
-            service_fn(|x| handle_request(&log, &request_counter, x)),
+            service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
         )
         .await;
     if let Err(e) = r {
@@ -168,12 +171,14 @@ async fn serve_connection(
 
 /// Request handler. This mostly defers to the `serve` module right now.
 fn handle_request(
+    args: Arc<Args>,
     log: &slog::Logger,
     request_counter: &AtomicU64,
     req: Request<Body>,
 ) -> impl Future<Output = Result<Response<Body>, ServeError>> {
     // Select a request ID and tag our logger with it.
     serve::files(
+        args,
         log.new(slog::o!(
             "rid" => request_counter
             .fetch_add(1, Ordering::Relaxed),

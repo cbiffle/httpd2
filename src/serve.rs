@@ -1,18 +1,21 @@
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use hyper::{Body, Method, Request, Response, StatusCode};
 
 use tokio::stream::StreamExt;
 use tokio_util::codec::{self, Decoder};
 
+use crate::args::Args;
 use crate::err::ServeError;
 use crate::picky::{self, FileOrDir};
 use crate::{percent, traversal};
 
 /// Attempts to serve a file in response to `req`.
 pub async fn files(
+    args: Arc<Args>,
     log: slog::Logger,
     req: Request<Body>,
 ) -> Result<Response<Body>, ServeError> {
@@ -71,6 +74,20 @@ pub async fn files(
                         response.headers_mut().insert(
                             hyper::header::CONTENT_ENCODING,
                             HeaderValue::from_static(enc),
+                        );
+                    }
+                    if args.hsts {
+                        response.headers_mut().insert(
+                            hyper::header::STRICT_TRANSPORT_SECURITY,
+                            // TODO: this should be larger, I'm keeping it low
+                            // for testing.
+                            HeaderValue::from_static("max-age=60"),
+                        );
+                    }
+                    if args.upgrade {
+                        response.headers_mut().insert(
+                            hyper::header::CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("upgrade-insecure-requests;"),
                         );
                     }
 

@@ -8,4 +8,3 @@
 
 - Unencrypted HTTP handling so I can turn off publicfile.
   - I feel like a simple 301 redirect to HTTPS would suffice.
-  - Should also implement HSTS to encourage browsers to do the redirect.

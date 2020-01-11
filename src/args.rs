@@ -15,6 +15,8 @@ pub struct Args {
     pub addr: SocketAddr,
     pub uid: Option<Uid>,
     pub gid: Option<Gid>,
+    pub hsts: bool,
+    pub upgrade: bool,
 }
 
 pub fn get_args() -> Result<Args, clap::Error> {
@@ -75,6 +77,16 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .help("Location of TLS certificate."),
         )
         .arg(
+            clap::Arg::with_name("hsts")
+                .help("Whether to send the Strict-Transport-Security header")
+                .long("hsts")
+        )
+        .arg(
+            clap::Arg::with_name("upgrade")
+                .help("Whether to send the upgrade-insecure-requests directive")
+                .long("upgrade")
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -116,6 +128,9 @@ pub fn get_args() -> Result<Args, clap::Error> {
         .value_of("gid")
         .map(|gid| Gid::from_raw(gid.parse::<libc::gid_t>().unwrap()));
 
+    let hsts = matches.is_present("hsts");
+    let upgrade = matches.is_present("upgrade");
+
     Ok(Args {
         root: std::path::PathBuf::from(root),
         key_path: std::path::PathBuf::from(key_path),
@@ -124,6 +139,8 @@ pub fn get_args() -> Result<Args, clap::Error> {
         addr,
         uid,
         gid,
+        hsts,
+        upgrade,
     })
 }
 
