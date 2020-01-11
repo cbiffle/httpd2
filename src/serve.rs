@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::{Body, Method, Request, Response, StatusCode};
 
@@ -20,6 +21,18 @@ pub async fn files(
     req: Request<Body>,
 ) -> Result<Response<Body>, ServeError> {
     let mut response = Response::new(Body::empty());
+
+    // Fetch the date of the caller's cached copy. We bump this forward by one
+    // second because httpdate truncates outgoing timestamps, causing the
+    // higher-precision filesystem timestamps to almost always be *after* the
+    // IMS timestamp due to non-zero nanoseconds.
+    // Pro: caching works.
+    // Con: multiple updates in less than a second may be missed.
+    let if_modified_since = req.headers().get(hyper::header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .map(|ims| ims + Duration::from_secs(1));
+    slog::debug!(log, "IMS: {:?}", if_modified_since);
 
     // Scan the request headers to see if gzip compressed responses are OK.
     let mut accept_gzip = false;
@@ -55,6 +68,11 @@ pub async fn files(
             match open_result {
                 Ok((FileOrDir::File(file), enc)) => {
                     use hyper::header::HeaderValue;
+
+                    let cached = if_modified_since
+                        .map(|ims| file.modified <= ims)
+                        .unwrap_or(false);
+                    slog::debug!(log, "modified={:?}", file.modified);
 
                     response
                         .headers_mut()
@@ -92,16 +110,29 @@ pub async fn files(
                     }
 
                     if method == Method::GET {
-                        slog::info!(
-                            log,
-                            "OK: len={} encoding={:?}",
-                            file.len,
-                            enc
-                        );
-                        *response.body_mut() = Body::wrap_stream(
-                            codec::BytesCodec::new()
+                        if cached {
+                            slog::info!(
+                                log,
+                                "OK: unmodified",
+                            );
+                            *response.status_mut() = StatusCode::NOT_MODIFIED;
+                        } else {
+                            slog::info!(
+                                log,
+                                "OK: len={} encoding={:?}",
+                                file.len,
+                                enc
+                            );
+                            *response.body_mut() = Body::wrap_stream(
+                                codec::BytesCodec::new()
                                 .framed(file.file)
                                 .map(|b| b.map(bytes::BytesMut::freeze)),
+                            );
+                        }
+                    } else {
+                        slog::info!(
+                            log,
+                            "OK: head",
                         );
                     }
                 }
