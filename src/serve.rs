@@ -10,7 +10,7 @@ use tokio_util::codec::{self, Decoder};
 
 use crate::args::Args;
 use crate::err::ServeError;
-use crate::picky::{self, FileOrDir};
+use crate::picky::{self, FileOrDir, File};
 use crate::{percent, traversal};
 
 /// Attempts to serve a file in response to `req`.
@@ -180,7 +180,11 @@ async fn picky_open_with_redirect_and_gzip(
                     if cfile.modified >= file.modified =>
                 {
                     slog::debug!(log, "serving gzip");
-                    Ok((FileOrDir::File(cfile), Some("gzip")))
+                    // Preserve mod date of original content.
+                    Ok((FileOrDir::File(File {
+                        modified: file.modified,
+                        ..cfile
+                    }), Some("gzip")))
                 }
                 _ => {
                     slog::debug!(log, "serving uncompressed");
