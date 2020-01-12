@@ -141,25 +141,31 @@ fn set_response_headers(
     file: &File,
     enc: Option<&'static str>,
 ) {
-    response
-        .headers_mut()
+    let headers = response.headers_mut();
+
+    headers
         .insert(hyper::header::CONTENT_LENGTH, file.len.into());
-    response.headers_mut().insert(
+    headers.insert(
         hyper::header::CONTENT_TYPE,
         HeaderValue::from_static(file.content_type),
     );
-    response.headers_mut().insert(
+    headers.insert(
         hyper::header::LAST_MODIFIED,
         HeaderValue::from_str(&httpdate::fmt_http_date(file.modified)).unwrap(),
     );
+    headers.insert(
+        hyper::header::VARY,
+        HeaderValue::from_name(hyper::header::ACCEPT_ENCODING),
+    );
     if let Some(enc) = enc {
-        response.headers_mut().insert(
+        headers.insert(
             hyper::header::CONTENT_ENCODING,
             HeaderValue::from_static(enc),
         );
+
     }
     if args.hsts {
-        response.headers_mut().insert(
+        headers.insert(
             hyper::header::STRICT_TRANSPORT_SECURITY,
             // TODO: this should be larger, I'm keeping it low
             // for testing.
@@ -167,7 +173,7 @@ fn set_response_headers(
         );
     }
     if args.upgrade {
-        response.headers_mut().insert(
+        headers.insert(
             hyper::header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("upgrade-insecure-requests;"),
         );
