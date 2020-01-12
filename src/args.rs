@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 
 use clap::arg_enum;
+use hyper::header::HeaderValue;
 use nix::unistd::{Gid, Uid};
 
 const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
@@ -19,6 +20,7 @@ pub struct Args {
     pub hsts: bool,
     pub upgrade: bool,
     pub log: Log,
+    pub cache_control: HeaderValue,
 }
 
 // TODO: looks like Clap's arg_enum doesn't allow variant attributes.
@@ -116,6 +118,14 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .case_insensitive(true),
         )
         .arg(
+            clap::Arg::with_name("max_age")
+                .help("How long resource can be cached, in seconds")
+                .long("max-age")
+                .takes_value(true)
+                .value_name("SECS")
+                .default_value("3600"),
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -161,6 +171,10 @@ pub fn get_args() -> Result<Args, clap::Error> {
     let upgrade = matches.is_present("upgrade");
     let log = value_t!(matches, "log", Log).unwrap();
 
+    let max_age = value_t!(matches, "max_age", u64).unwrap();
+    let cache_control =
+        HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap();
+
     Ok(Args {
         root: std::path::PathBuf::from(root),
         key_path: std::path::PathBuf::from(key_path),
@@ -172,5 +186,6 @@ pub fn get_args() -> Result<Args, clap::Error> {
         hsts,
         upgrade,
         log,
+        cache_control,
     })
 }

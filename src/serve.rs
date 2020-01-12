@@ -143,8 +143,7 @@ fn set_response_headers(
 ) {
     let headers = response.headers_mut();
 
-    headers
-        .insert(hyper::header::CONTENT_LENGTH, file.len.into());
+    headers.insert(hyper::header::CONTENT_LENGTH, file.len.into());
     headers.insert(
         hyper::header::CONTENT_TYPE,
         HeaderValue::from_static(file.content_type),
@@ -157,12 +156,12 @@ fn set_response_headers(
         hyper::header::VARY,
         HeaderValue::from_name(hyper::header::ACCEPT_ENCODING),
     );
+    headers.insert(hyper::header::CACHE_CONTROL, args.cache_control.clone());
     if let Some(enc) = enc {
         headers.insert(
             hyper::header::CONTENT_ENCODING,
             HeaderValue::from_static(enc),
         );
-
     }
     if args.hsts {
         headers.insert(
