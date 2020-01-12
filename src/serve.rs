@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hyper::header::HeaderValue;
 use hyper::{Body, Method, Request, Response, StatusCode};
 
 use tokio::stream::StreamExt;
@@ -69,49 +70,12 @@ pub async fn files(
 
             match open_result {
                 Ok((FileOrDir::File(file), enc)) => {
-                    use hyper::header::HeaderValue;
-
                     let cached = if_modified_since
                         .map(|ims| file.modified <= ims)
                         .unwrap_or(false);
                     slog::debug!(log, "modified={:?}", file.modified);
 
-                    response
-                        .headers_mut()
-                        .insert(hyper::header::CONTENT_LENGTH, file.len.into());
-                    response.headers_mut().insert(
-                        hyper::header::CONTENT_TYPE,
-                        HeaderValue::from_static(file.content_type),
-                    );
-                    response.headers_mut().insert(
-                        hyper::header::LAST_MODIFIED,
-                        HeaderValue::from_str(&httpdate::fmt_http_date(
-                            file.modified,
-                        ))
-                        .unwrap(),
-                    );
-                    if let Some(enc) = enc {
-                        response.headers_mut().insert(
-                            hyper::header::CONTENT_ENCODING,
-                            HeaderValue::from_static(enc),
-                        );
-                    }
-                    if args.hsts {
-                        response.headers_mut().insert(
-                            hyper::header::STRICT_TRANSPORT_SECURITY,
-                            // TODO: this should be larger, I'm keeping it low
-                            // for testing.
-                            HeaderValue::from_static("max-age=60"),
-                        );
-                    }
-                    if args.upgrade {
-                        response.headers_mut().insert(
-                            hyper::header::CONTENT_SECURITY_POLICY,
-                            HeaderValue::from_static(
-                                "upgrade-insecure-requests;",
-                            ),
-                        );
-                    }
+                    set_response_headers(&*args, &mut response, &file, enc);
 
                     if method == Method::GET {
                         if cached {
@@ -124,11 +88,7 @@ pub async fn files(
                                 file.len,
                                 enc
                             );
-                            *response.body_mut() = Body::wrap_stream(
-                                codec::BytesCodec::new()
-                                    .framed(file.file)
-                                    .map(|b| b.map(bytes::BytesMut::freeze)),
-                            );
+                            set_file_as_body(&mut response, file);
                         }
                     } else {
                         slog::info!(log, "OK: head");
@@ -156,7 +116,70 @@ pub async fn files(
         }
     }
 
+    if response.status().is_server_error()
+        || response.status().is_client_error()
+    {
+        // Attempt to present the user with an error page.
+        slog::debug!(log, "searching for error page");
+        // TODO: it would be nice to break the picky combinators out, so I could
+        // have picky_open_with_gzip (no redirect) here.
+        let mut redirect = "./errors/404.html".to_string();
+        if let Ok((FileOrDir::File(error_page), enc)) =
+            picky_open_with_redirect_and_gzip(&log, &mut redirect).await
+        {
+            set_response_headers(&*args, &mut response, &error_page, enc);
+            set_file_as_body(&mut response, error_page);
+        }
+    }
+
     Ok(response)
+}
+
+fn set_response_headers(
+    args: &Args,
+    response: &mut Response<Body>,
+    file: &File,
+    enc: Option<&'static str>,
+) {
+    response
+        .headers_mut()
+        .insert(hyper::header::CONTENT_LENGTH, file.len.into());
+    response.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        HeaderValue::from_static(file.content_type),
+    );
+    response.headers_mut().insert(
+        hyper::header::LAST_MODIFIED,
+        HeaderValue::from_str(&httpdate::fmt_http_date(file.modified)).unwrap(),
+    );
+    if let Some(enc) = enc {
+        response.headers_mut().insert(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static(enc),
+        );
+    }
+    if args.hsts {
+        response.headers_mut().insert(
+            hyper::header::STRICT_TRANSPORT_SECURITY,
+            // TODO: this should be larger, I'm keeping it low
+            // for testing.
+            HeaderValue::from_static("max-age=60"),
+        );
+    }
+    if args.upgrade {
+        response.headers_mut().insert(
+            hyper::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("upgrade-insecure-requests;"),
+        );
+    }
+}
+
+fn set_file_as_body(response: &mut Response<Body>, file: File) {
+    *response.body_mut() = Body::wrap_stream(
+        codec::BytesCodec::new()
+            .framed(file.file)
+            .map(|b| b.map(bytes::BytesMut::freeze)),
+    );
 }
 
 /// Extends `picky::open` with directory redirect handling.
