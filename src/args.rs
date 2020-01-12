@@ -99,12 +99,12 @@ pub fn get_args() -> Result<Args, clap::Error> {
         .arg(
             clap::Arg::with_name("hsts")
                 .help("Whether to send the Strict-Transport-Security header")
-                .long("hsts")
+                .long("hsts"),
         )
         .arg(
             clap::Arg::with_name("upgrade")
                 .help("Whether to send the upgrade-insecure-requests directive")
-                .long("upgrade")
+                .long("upgrade"),
         )
         .arg(
             clap::Arg::with_name("log")
@@ -113,7 +113,7 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .short("l")
                 .possible_values(&Log::variants())
                 .default_value("stderr")
-                .case_insensitive(true)
+                .case_insensitive(true),
         )
         .arg(
             clap::Arg::with_name("DIR")
@@ -174,4 +174,3 @@ pub fn get_args() -> Result<Args, clap::Error> {
         log,
     })
 }
-

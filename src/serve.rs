@@ -11,7 +11,7 @@ use tokio_util::codec::{self, Decoder};
 
 use crate::args::Args;
 use crate::err::ServeError;
-use crate::picky::{self, FileOrDir, File};
+use crate::picky::{self, File, FileOrDir};
 use crate::{percent, traversal};
 
 /// Attempts to serve a file in response to `req`.
@@ -28,7 +28,9 @@ pub async fn files(
     // IMS timestamp due to non-zero nanoseconds.
     // Pro: caching works.
     // Con: multiple updates in less than a second may be missed.
-    let if_modified_since = req.headers().get(hyper::header::IF_MODIFIED_SINCE)
+    let if_modified_since = req
+        .headers()
+        .get(hyper::header::IF_MODIFIED_SINCE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| httpdate::parse_http_date(value).ok())
         .map(|ims| ims + Duration::from_secs(1));
@@ -105,16 +107,15 @@ pub async fn files(
                     if args.upgrade {
                         response.headers_mut().insert(
                             hyper::header::CONTENT_SECURITY_POLICY,
-                            HeaderValue::from_static("upgrade-insecure-requests;"),
+                            HeaderValue::from_static(
+                                "upgrade-insecure-requests;",
+                            ),
                         );
                     }
 
                     if method == Method::GET {
                         if cached {
-                            slog::info!(
-                                log,
-                                "OK: unmodified",
-                            );
+                            slog::info!(log, "OK: unmodified");
                             *response.status_mut() = StatusCode::NOT_MODIFIED;
                         } else {
                             slog::info!(
@@ -125,15 +126,12 @@ pub async fn files(
                             );
                             *response.body_mut() = Body::wrap_stream(
                                 codec::BytesCodec::new()
-                                .framed(file.file)
-                                .map(|b| b.map(bytes::BytesMut::freeze)),
+                                    .framed(file.file)
+                                    .map(|b| b.map(bytes::BytesMut::freeze)),
                             );
                         }
                     } else {
-                        slog::info!(
-                            log,
-                            "OK: head",
-                        );
+                        slog::info!(log, "OK: head");
                     }
                 }
                 // To avoid disclosing information, we signal any other case
@@ -212,10 +210,13 @@ async fn picky_open_with_redirect_and_gzip(
                 {
                     slog::debug!(log, "serving gzip");
                     // Preserve mod date of original content.
-                    Ok((FileOrDir::File(File {
-                        modified: file.modified,
-                        ..cfile
-                    }), Some("gzip")))
+                    Ok((
+                        FileOrDir::File(File {
+                            modified: file.modified,
+                            ..cfile
+                        }),
+                        Some("gzip"),
+                    ))
                 }
                 _ => {
                     slog::debug!(log, "serving uncompressed");

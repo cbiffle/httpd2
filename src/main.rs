@@ -52,14 +52,16 @@ async fn main() {
                 .build()
                 .fuse();
             // Don't block the server until a bunch of records have built up.
-            let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
+            let drain =
+                slog_async::Async::new(drain).chan_size(1024).build().fuse();
             slog::Logger::root(drain, slog::o!())
         }
         #[cfg(feature = "journald")]
         Log::Journald => {
             let drain = slog_journald::JournaldDrain.ignore_res();
             // Don't block the server until a bunch of records have built up.
-            let drain = slog_async::Async::new(drain).chan_size(1024).build().fuse();
+            let drain =
+                slog_async::Async::new(drain).chan_size(1024).build().fuse();
             slog::Logger::root(drain, slog::o!())
         }
     };
@@ -69,7 +71,6 @@ async fn main() {
 
 /// Starts up a server.
 async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
-
     // Sanity check configuration.
     let root = Uid::from_raw(0);
     if Uid::current() == root {
@@ -122,7 +123,9 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
                 // Now that we're in the connection-specific task, do the actual
                 // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
-                    Ok(stream) => serve_connection(args, log, http, stream).await,
+                    Ok(stream) => {
+                        serve_connection(args, log, http, stream).await
+                    }
                     Err(e) => {
                         // TLS negotiation failed. In my observations so far,
                         // this mostly happens when a client speaks HTTP (or
@@ -167,7 +170,9 @@ async fn serve_connection(
     let r = http
         .serve_connection(
             stream,
-            service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
+            service_fn(|x| {
+                handle_request(args.clone(), &log, &request_counter, x)
+            }),
         )
         .await;
     if let Err(e) = r {
