@@ -4,6 +4,7 @@ mod percent;
 mod picky;
 mod serve;
 mod traversal;
+mod sync;
 
 use std::future::Future;
 use std::io;
