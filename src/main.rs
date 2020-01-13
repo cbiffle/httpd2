@@ -24,7 +24,6 @@ use rustls::{
 };
 
 use tokio::net::TcpStream;
-use tokio::stream::StreamExt;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use self::args::{get_args, Args, Log};
@@ -102,15 +101,12 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
     slog::info!(log, "serving {}", args.addr);
 
     // Accept loop:
-    let mut incoming = listener.incoming();
     let connection_counter = AtomicU64::new(0);
-    while let Some(stream) = incoming.next().await {
-        if let Ok(socket) = stream {
+    loop {
+        if let Ok((socket, peer)) = listener.accept().await {
             // New connection received. Add metadata to the logger.
             let log = log.new(slog::o!(
-                "peer" => socket.peer_addr()
-                    .map(|sa| sa.to_string())
-                    .unwrap_or_else(|_| "UNKNOWN".to_string()),
+                "peer" => peer.to_string(),
                 "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
             ));
             // Clone the acceptor handle and HTTP config so they can be moved
@@ -140,8 +136,6 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
             slog::warn!(log, "error accepting");
         }
     }
-
-    Ok(())
 }
 
 /// Connection handler. Returns a future that processes requests on `stream`.
