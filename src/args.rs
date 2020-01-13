@@ -21,6 +21,8 @@ pub struct Args {
     pub upgrade: bool,
     pub log: Log,
     pub cache_control: HeaderValue,
+    pub max_connections: usize,
+    pub max_streams: u32,
 }
 
 // TODO: looks like Clap's arg_enum doesn't allow variant attributes.
@@ -126,6 +128,22 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .default_value("3600"),
         )
         .arg(
+            clap::Arg::with_name("max_connections")
+                .help("Max number of simultaneous connections to accept")
+                .long("max-connections")
+                .takes_value(true)
+                .value_name("COUNT")
+                .default_value("100000"),
+        )
+        .arg(
+            clap::Arg::with_name("max_streams")
+                .help("Max number of concurrent streams per connection")
+                .long("max-streams")
+                .takes_value(true)
+                .value_name("COUNT")
+                .default_value("10"),
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -174,6 +192,8 @@ pub fn get_args() -> Result<Args, clap::Error> {
     let max_age = value_t!(matches, "max_age", u64).unwrap();
     let cache_control =
         HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap();
+    let max_connections = value_t!(matches, "max_connections", usize).unwrap();
+    let max_streams = value_t!(matches, "max_streams", u32).unwrap();
 
     Ok(Args {
         root: std::path::PathBuf::from(root),
@@ -187,5 +207,7 @@ pub fn get_args() -> Result<Args, clap::Error> {
         upgrade,
         log,
         cache_control,
+        max_connections,
+        max_streams,
     })
 }

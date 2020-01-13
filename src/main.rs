@@ -29,6 +29,7 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use self::args::{get_args, Args, Log};
 use self::err::ServeError;
+use self::sync::SharedSemaphore;
 
 /// Main server entry point.
 #[tokio::main]
@@ -96,14 +97,16 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
     // Dropping privileges here...
     drop_privs(&log, &args)?;
 
-    let (tls_acceptor, http) = configure_server_bits(key, cert_chain)?;
+    let (tls_acceptor, http) = configure_server_bits(&args, key, cert_chain)?;
     let args = Arc::new(args);
 
     slog::info!(log, "serving {}", args.addr);
 
     // Accept loop:
     let connection_counter = AtomicU64::new(0);
+    let connection_permits = SharedSemaphore::new(args.max_connections);
     loop {
+        let permit = connection_permits.acquire().await;
         if let Ok((socket, peer)) = listener.accept().await {
             // New connection received. Add metadata to the logger.
             let log = log.new(slog::o!(
@@ -117,6 +120,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
             let args = args.clone();
             // Spawn the connection future.
             tokio::spawn(async move {
+                let _permit = permit;
                 // Now that we're in the connection-specific task, do the actual
                 // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
@@ -154,9 +158,8 @@ async fn serve_connection(
         let session = stream.get_ref().1;
         let protocol =
             std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE"))
-                .unwrap_or("BOGUS")
-                .to_string();
-        slog::debug!(log, "ALPN result: {}", protocol);
+                .unwrap_or("BOGUS");
+        slog::info!(log, "conn {}", protocol);
     }
 
     // Begin handling requests. The request_counter tracks
@@ -253,6 +256,7 @@ fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
 
 /// Configure TLS and HTTP options for the server.
 fn configure_server_bits(
+    args: &Args,
     private_key: PrivateKey,
     cert_chain: Vec<Certificate>,
 ) -> Result<(TlsAcceptor, Http), ServeError> {
@@ -269,8 +273,10 @@ fn configure_server_bits(
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
     };
-    // Currently Hyper's default configuration is fine with me.
-    let http = Http::new();
+    // Configure Hyper.
+    let mut http = Http::new();
+    http.http2_max_concurrent_streams(Some(args.max_streams));
+    http.max_buf_size(16384); // down from 400kiB default
 
     Ok((tls_acceptor, http))
 }
