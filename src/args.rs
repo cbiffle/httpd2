@@ -1,6 +1,7 @@
 //! Server argument parsing.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::arg_enum;
@@ -181,45 +182,33 @@ pub fn get_args() -> Result<Args, clap::Error> {
 
     use clap::value_t;
 
-    let root = matches.value_of("DIR").unwrap();
-    let key_path = matches.value_of("key_path").unwrap();
-    let cert_path = matches.value_of("cert_path").unwrap();
-    let should_chroot = matches.is_present("chroot");
-    let addr = value_t!(matches, "addr", SocketAddr)
-        .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT)));
-
-    let uid = matches
-        .value_of("uid")
-        .map(|uid| Uid::from_raw(uid.parse::<libc::uid_t>().unwrap()));
-    let gid = matches
-        .value_of("gid")
-        .map(|gid| Gid::from_raw(gid.parse::<libc::gid_t>().unwrap()));
-
-    let hsts = matches.is_present("hsts");
-    let upgrade = matches.is_present("upgrade");
-    let log = value_t!(matches, "log", Log).unwrap();
-
-    let max_age = value_t!(matches, "max_age", u64).unwrap();
-    let cache_control =
-        HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap();
-    let max_connections = value_t!(matches, "max_connections", usize).unwrap();
-    let max_streams = value_t!(matches, "max_streams", u32).unwrap();
-    let connection_time_limit = Duration::from_secs(value_t!(matches, "connection_time_limit", u64).unwrap());
-
     Ok(Args {
-        root: std::path::PathBuf::from(root),
-        key_path: std::path::PathBuf::from(key_path),
-        cert_path: std::path::PathBuf::from(cert_path),
-        should_chroot,
-        addr,
-        uid,
-        gid,
-        hsts,
-        upgrade,
-        log,
-        cache_control,
-        max_connections,
-        max_streams,
-        connection_time_limit,
+        root: PathBuf::from(matches.value_of("DIR").unwrap()),
+        key_path: PathBuf::from(matches.value_of("key_path").unwrap()),
+        cert_path: PathBuf::from(matches.value_of("cert_path").unwrap()),
+        should_chroot: matches.is_present("chroot"),
+        addr: value_t!(matches, "addr", SocketAddr)
+            .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT))),
+
+        uid: matches
+            .value_of("uid")
+            .map(|uid| Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())),
+        gid: matches
+            .value_of("gid")
+            .map(|gid| Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())),
+
+        hsts: matches.is_present("hsts"),
+        upgrade: matches.is_present("upgrade"),
+        log: value_t!(matches, "log", Log).unwrap(),
+
+        cache_control: {
+            let max_age = value_t!(matches, "max_age", u64).unwrap();
+            HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap()
+        },
+        max_connections: value_t!(matches, "max_connections", usize).unwrap(),
+        max_streams: value_t!(matches, "max_streams", u32).unwrap(),
+        connection_time_limit: Duration::from_secs(
+            value_t!(matches, "connection_time_limit", u64).unwrap(),
+        ),
     })
 }
