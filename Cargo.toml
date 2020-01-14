@@ -26,3 +26,6 @@ slog = "2"
 slog-async = "2"
 slog-term = "2"
 slog-journald = {version = "2", optional = true}
+
+[profile.release]
+debug = 2
