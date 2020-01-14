@@ -26,7 +26,9 @@ impl SharedSemaphore {
     /// Acquires one permit, resolving when it's acquired.
     pub async fn acquire(&self) -> SharedPermit {
         self.inner.acquire().await.forget();
-        SharedPermit { inner: Arc::clone(&self.inner) }
+        SharedPermit {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 

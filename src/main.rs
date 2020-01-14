@@ -4,8 +4,8 @@ mod log;
 mod percent;
 mod picky;
 mod serve;
-mod traversal;
 mod sync;
+mod traversal;
 
 use std::future::Future;
 use std::io;
@@ -172,8 +172,8 @@ async fn serve_connection(
     // Announce the connection and record the parameters we have.
     {
         use rustls::Session;
-            let session = stream.get_ref().1;
-        let alpn = 
+        let session = stream.get_ref().1;
+        let alpn =
             std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE"))
                 .unwrap_or("BOGUS");
         slog::info!(
@@ -189,26 +189,21 @@ async fn serve_connection(
     // Begin handling requests. The request_counter tracks
     // request IDs within this connection.
     let request_counter = AtomicU64::new(0);
-    let connection_server = http
-        .serve_connection(
-            stream,
-            service_fn(|x| {
-                handle_request(args.clone(), &log, &request_counter, x)
-            }),
-        );
+    let connection_server = http.serve_connection(
+        stream,
+        service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
+    );
     match timeout(args.connection_time_limit, connection_server).await {
         Err(_) => {
             slog::info!(log, "closed"; "cause" => "timeout");
         }
-        Ok(conn_result) => {
-            match conn_result {
-                Ok(_) => slog::info!(log, "closed"),
-                Err(e) => {
-                    slog::info!(log, "closed"; "cause" => "error");
-                    slog::debug!(log, "error"; "msg" => %e);
-                },
+        Ok(conn_result) => match conn_result {
+            Ok(_) => slog::info!(log, "closed"),
+            Err(e) => {
+                slog::info!(log, "closed"; "cause" => "error");
+                slog::debug!(log, "error"; "msg" => %e);
             }
-        }
+        },
     }
 }
 

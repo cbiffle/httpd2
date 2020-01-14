@@ -16,7 +16,6 @@ use crate::log::OptionKV;
 use crate::picky::{self, File, FileOrDir};
 use crate::{percent, traversal};
 
-
 /// Attempts to serve a file in response to `req`.
 pub async fn files(
     args: Arc<Args>,

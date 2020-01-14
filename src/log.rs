@@ -10,9 +10,9 @@ impl<T> From<Option<T>> for OptionKV<T> {
 
 impl<T: slog::KV> slog::KV for OptionKV<T> {
     fn serialize(
-        &self, 
-        record: &slog::Record, 
-        serializer: &mut dyn slog::Serializer
+        &self,
+        record: &slog::Record,
+        serializer: &mut dyn slog::Serializer,
     ) -> slog::Result {
         match &self.0 {
             None => Ok(()),
