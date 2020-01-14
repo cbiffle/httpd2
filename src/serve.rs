@@ -48,25 +48,30 @@ pub async fn files(
         }
     }
 
-    // Process GET requests.
     let method = req.method();
-    match (method, req.uri().path()) {
+    let uri = req.uri();
+    slog::info!(
+        log,
+        "{}", method;
+        "uri" => %uri,
+        "version" => ?req.version(),
+    );
+
+    // Process GET requests.
+    let mut response_info = match (method, uri.path()) {
         (&Method::GET, path) | (&Method::HEAD, path) => {
             // Sanitize the path using a derivative of publicfile's algorithm.
             // It appears that Hyper blocks non-ASCII characters.
             // Allocate enough room for a path that doesn't require
             // sanitization, plus the initial dot-slash.
-            slog::info!(log, "{} {}", method, path);
             let mut sanitized = sanitize_path(path);
 
             // Select content encoding.
-            let open_result = if accept_gzip {
-                picky_open_with_redirect_and_gzip(&log, &mut sanitized).await
-            } else {
-                picky_open_with_redirect(&log, &mut sanitized)
-                    .await
-                    .map(|f| (f, None))
-            };
+            let open_result = picky_open_with_redirect_and_gzip(
+                &log,
+                &mut sanitized,
+                accept_gzip,
+            ).await;
 
             match open_result {
                 Ok((FileOrDir::File(file), enc)) => {
@@ -79,19 +84,18 @@ pub async fn files(
 
                     if method == Method::GET {
                         if cached {
-                            slog::info!(log, "OK: unmodified");
                             *response.status_mut() = StatusCode::NOT_MODIFIED;
+                            ResponseInfo::Success(None)
                         } else {
-                            slog::info!(
-                                log,
-                                "OK: len={} encoding={:?}",
-                                file.len,
-                                enc
-                            );
+                            let len = file.len;
                             set_file_as_body(&mut response, file);
+                            ResponseInfo::Success(Some(Served {
+                                len,
+                                encoding: enc.unwrap_or("raw"),
+                            }))
                         }
                     } else {
-                        slog::info!(log, "OK: head");
+                        ResponseInfo::Success(None)
                     }
                 }
                 // To avoid disclosing information, we signal any other case
@@ -101,38 +105,108 @@ pub async fn files(
                 // - One level of directory redirect followed, but still
                 //   found a directory.
                 Ok(_) => {
-                    slog::info!(log, "failed: would serve directory");
                     *response.status_mut() = StatusCode::NOT_FOUND;
+                    ResponseInfo::Error(
+                        ErrorContext::Fixed("would serve directory"),
+                        None,
+                    )
                 }
                 Err(e) => {
-                    slog::info!(log, "failed: {}", e);
                     *response.status_mut() = StatusCode::NOT_FOUND;
+                    ResponseInfo::Error(
+                        ErrorContext::Error(e),
+                        None,
+                    )
                 }
             }
         }
         _ => {
             // Any other request method falls here.
             *response.status_mut() = StatusCode::NOT_FOUND;
+            ResponseInfo::Error(ErrorContext::Fixed("bad method"), None)
         }
-    }
+    };
 
-    if response.status().is_server_error()
-        || response.status().is_client_error()
-    {
+    if let ResponseInfo::Error(_, srv) = &mut response_info {
         // Attempt to present the user with an error page.
         slog::debug!(log, "searching for error page");
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_gzip (no redirect) here.
         let mut redirect = "./errors/404.html".to_string();
-        if let Ok((FileOrDir::File(error_page), enc)) =
-            picky_open_with_redirect_and_gzip(&log, &mut redirect).await
-        {
+        let err_result = picky_open_with_redirect_and_gzip(
+            &log,
+            &mut redirect,
+            accept_gzip,
+        ).await;
+        if let Ok((FileOrDir::File(error_page), enc)) = err_result {
+            *srv = Some(Served {
+                len: error_page.len,
+                encoding: enc.unwrap_or("raw"),
+            });
             set_response_headers(&*args, &mut response, &error_page, enc);
             set_file_as_body(&mut response, error_page);
         }
     }
 
+    match response_info {
+        ResponseInfo::Error(ErrorContext::Fixed(ctx), None) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+            "err" => ctx,
+        ),
+        ResponseInfo::Error(ErrorContext::Fixed(ctx), Some(s)) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+            "err" => ctx,
+            "len" => s.len,
+            "enc" => s.encoding,
+        ),
+        ResponseInfo::Error(ErrorContext::Error(e), None) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+            "err" => %e,
+        ),
+        ResponseInfo::Error(ErrorContext::Error(e), Some(s)) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+            "err" => %e,
+            "len" => s.len,
+            "enc" => s.encoding,
+        ),
+        ResponseInfo::Success(None) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+        ),
+        ResponseInfo::Success(Some(s)) => slog::info!(
+            log,
+            "response";
+            "status" => response.status().as_u16(),
+            "len" => s.len,
+            "enc" => s.encoding,
+        ),
+    }
+
     Ok(response)
+}
+
+enum ErrorContext {
+    Fixed(&'static str),
+    Error(io::Error),
+}
+
+enum ResponseInfo {
+    Error(ErrorContext, Option<Served>),
+    Success(Option<Served>),
+}
+
+struct Served {
+    len: u64,
+    encoding: &'static str,
 }
 
 fn set_response_headers(
@@ -224,10 +298,11 @@ async fn picky_open_with_redirect(
 async fn picky_open_with_redirect_and_gzip(
     log: &slog::Logger,
     path: &mut String,
+    accept_gzip: bool,
 ) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
     match picky_open_with_redirect(log, path).await? {
         FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
-        FileOrDir::File(file) => {
+        FileOrDir::File(file) if accept_gzip => {
             slog::debug!(log, "checking for precompressed alternate");
             path.push_str(".gz");
             // Note that we're "inferring" the old content-type.
@@ -252,6 +327,7 @@ async fn picky_open_with_redirect_and_gzip(
                 }
             }
         }
+        any => Ok((any, None)),
     }
 }
 
