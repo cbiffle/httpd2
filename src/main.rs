@@ -128,7 +128,6 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
         if let Ok((socket, peer)) = listener.accept().await {
             // New connection received. Add metadata to the logger.
             let log = log.new(slog::o!(
-                "peer" => peer.to_string(),
                 "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
             ));
             // Clone the acceptor handle and HTTP config so they can be moved
@@ -143,7 +142,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
                 // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
                     Ok(stream) => {
-                        serve_connection(args, log, http, stream).await
+                        serve_connection(args, log, http, stream, peer).await
                     }
                     Err(e) => {
                         // TLS negotiation failed. In my observations so far,
@@ -167,17 +166,23 @@ async fn serve_connection(
     log: slog::Logger,
     http: Http,
     stream: TlsStream<TcpStream>,
+    peer: std::net::SocketAddr,
 ) {
-    // Record the actual protocol we wound up using after
-    // ALPN.
+    // Announce the connection and record the parameters we have.
     {
         use rustls::Session;
-
-        let session = stream.get_ref().1;
-        let protocol =
+            let session = stream.get_ref().1;
+        let alpn = 
             std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE"))
                 .unwrap_or("BOGUS");
-        slog::info!(log, "conn {}", protocol);
+        slog::info!(
+            log,
+            "connect";
+            "peer" => peer,
+            "alpn" => alpn,
+            "tls" => ?session.get_protocol_version().unwrap(),
+            "cipher" => ?session.get_negotiated_ciphersuite().unwrap().suite,
+        );
     }
 
     // Begin handling requests. The request_counter tracks
