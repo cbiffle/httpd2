@@ -18,7 +18,7 @@ use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use hyper::{Body, Request, Response};
 
-use nix::unistd::Uid;
+use nix::unistd::{Gid, Uid};
 
 use rustls::{
     Certificate, NoClientAuth, PrivateKey, ProtocolVersion, ServerConfig,
@@ -118,7 +118,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
     let (tls_acceptor, http) = configure_server_bits(&args, key, cert_chain)?;
     let args = Arc::new(args);
 
-    slog::info!(log, "serving {}", args.addr);
+    slog::info!(log, "serving"; "addr" => args.addr);
 
     // Accept loop:
     let connection_counter = AtomicU64::new(0);
@@ -260,21 +260,26 @@ fn load_key_and_cert(
 /// the CWD; at most, it chroots and changes to an unprivileged user.
 fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
     std::env::set_current_dir(&args.root)?;
-    slog::info!(log, "cwd: {:?}", args.root);
 
     if args.should_chroot {
         nix::unistd::chroot(&args.root)?;
-        slog::info!(log, "in chroot");
     }
     if let Some(gid) = args.gid {
         nix::unistd::setgid(gid)?;
         nix::unistd::setgroups(&[gid])?;
-        slog::info!(log, "gid: {}", gid);
     }
     if let Some(uid) = args.uid {
         nix::unistd::setuid(uid)?;
-        slog::info!(log, "uid: {}", uid);
     }
+    slog::info!(
+        log,
+        "privs";
+        "cwd" => %args.root.display(),
+        "chroot" => args.should_chroot,
+        "setuid" => args.uid.map(Uid::as_raw),
+        "setgid" => args.gid.map(Gid::as_raw),
+    );
+
     Ok(())
 }
 
