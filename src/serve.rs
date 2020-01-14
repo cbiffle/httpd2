@@ -66,7 +66,7 @@ pub async fn files(
             // It appears that Hyper blocks non-ASCII characters.
             let mut sanitized = sanitize_path(path);
 
-            // Select content encoding.
+            // Now, see what the path yields.
             let open_result = picky_open_with_redirect_and_gzip(
                 &log,
                 &mut sanitized,
@@ -258,6 +258,15 @@ async fn picky_open_with_redirect(
     log: &slog::Logger,
     path: &mut String,
 ) -> Result<FileOrDir, io::Error> {
+    // Performance optimization: if the path is *syntactically* a directory,
+    // i.e. it ends in a slash, pre-append the `index.html`. This reduces
+    // filesystem round trips (and thus the number of blocking operations
+    // affecting the thread pool) by 1, and improved a particular load benchmark
+    // by 18% at the time of writing.
+    if path.ends_with("/") {
+        path.push_str("index.html");
+    }
+
     match picky::open(log, Path::new(path), map_content_type).await? {
         FileOrDir::Dir => {
             slog::debug!(log, "--> index.html");
