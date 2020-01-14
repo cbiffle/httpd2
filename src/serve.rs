@@ -64,8 +64,6 @@ pub async fn files(
         (&Method::GET, path) | (&Method::HEAD, path) => {
             // Sanitize the path using a derivative of publicfile's algorithm.
             // It appears that Hyper blocks non-ASCII characters.
-            // Allocate enough room for a path that doesn't require
-            // sanitization, plus the initial dot-slash.
             let mut sanitized = sanitize_path(path);
 
             // Select content encoding.
