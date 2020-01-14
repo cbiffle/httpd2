@@ -25,6 +25,7 @@ use rustls::{
 };
 
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use self::args::{get_args, Args, Log};
@@ -165,23 +166,29 @@ async fn serve_connection(
     // Begin handling requests. The request_counter tracks
     // request IDs within this connection.
     let request_counter = AtomicU64::new(0);
-    let r = http
+    let connection_server = http
         .serve_connection(
             stream,
             service_fn(|x| {
                 handle_request(args.clone(), &log, &request_counter, x)
             }),
-        )
-        .await;
-    if let Err(e) = r {
-        // In practice, there's always at least one of these
-        // at the end of the connection, and I haven't
-        // figured out a way to distinguish the typical
-        // cases from atypical -- so log at a low level.
-        slog::debug!(log, "error in connection: {}", e);
+        );
+    match timeout(args.connection_time_limit, connection_server).await {
+        Err(_) => {
+            slog::info!(log, "connection closed (timeout)");
+        }
+        Ok(conn_result) => {
+            if let Err(e) = conn_result {
+                // In practice, there's always at least one of these
+                // at the end of the connection, and I haven't
+                // figured out a way to distinguish the typical
+                // cases from atypical -- so log at a low level.
+                slog::debug!(log, "error in connection: {}", e);
+            }
+            // This is for observing connection duration.
+            slog::info!(log, "connection closed");
+        }
     }
-    // This is for observing connection duration.
-    slog::info!(log, "connection closed");
 }
 
 /// Request handler. This mostly defers to the `serve` module right now.

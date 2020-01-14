@@ -1,6 +1,7 @@
 //! Server argument parsing.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use clap::arg_enum;
 use hyper::header::HeaderValue;
@@ -23,6 +24,7 @@ pub struct Args {
     pub cache_control: HeaderValue,
     pub max_connections: usize,
     pub max_streams: u32,
+    pub connection_time_limit: Duration,
 }
 
 // TODO: looks like Clap's arg_enum doesn't allow variant attributes.
@@ -144,6 +146,14 @@ pub fn get_args() -> Result<Args, clap::Error> {
                 .default_value("10"),
         )
         .arg(
+            clap::Arg::with_name("connection_time_limit")
+                .help("Maximum duration a single connection can stay open.")
+                .long("max-conn-time")
+                .takes_value(true)
+                .value_name("SECS")
+                .default_value("181"),
+        )
+        .arg(
             clap::Arg::with_name("DIR")
                 .help("Path to serve")
                 .required(true)
@@ -194,6 +204,7 @@ pub fn get_args() -> Result<Args, clap::Error> {
         HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap();
     let max_connections = value_t!(matches, "max_connections", usize).unwrap();
     let max_streams = value_t!(matches, "max_streams", u32).unwrap();
+    let connection_time_limit = Duration::from_secs(value_t!(matches, "connection_time_limit", u64).unwrap());
 
     Ok(Args {
         root: std::path::PathBuf::from(root),
@@ -209,5 +220,6 @@ pub fn get_args() -> Result<Args, clap::Error> {
         cache_control,
         max_connections,
         max_streams,
+        connection_time_limit,
     })
 }
