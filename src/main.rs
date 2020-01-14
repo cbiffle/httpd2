@@ -198,18 +198,16 @@ async fn serve_connection(
         );
     match timeout(args.connection_time_limit, connection_server).await {
         Err(_) => {
-            slog::info!(log, "connection closed (timeout)");
+            slog::info!(log, "closed"; "cause" => "timeout");
         }
         Ok(conn_result) => {
-            if let Err(e) = conn_result {
-                // In practice, there's always at least one of these
-                // at the end of the connection, and I haven't
-                // figured out a way to distinguish the typical
-                // cases from atypical -- so log at a low level.
-                slog::debug!(log, "error in connection: {}", e);
+            match conn_result {
+                Ok(_) => slog::info!(log, "closed"),
+                Err(e) => {
+                    slog::info!(log, "closed"; "cause" => "error");
+                    slog::debug!(log, "error"; "msg" => %e);
+                },
             }
-            // This is for observing connection duration.
-            slog::info!(log, "connection closed");
         }
     }
 }
