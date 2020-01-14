@@ -290,7 +290,6 @@ async fn picky_open_with_redirect_and_gzip(
     accept_gzip: bool,
 ) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
     match picky_open_with_redirect(log, path).await? {
-        FileOrDir::Dir => Ok((FileOrDir::Dir, None)),
         FileOrDir::File(file) if accept_gzip => {
             slog::debug!(log, "checking for precompressed alternate");
             path.push_str(".gz");
