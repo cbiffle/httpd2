@@ -39,13 +39,12 @@ use self::sync::SharedSemaphore;
 static GLOBAL: std::alloc::System = std::alloc::System;
 
 /// Main server entry point.
-#[tokio::main]
-async fn main() {
-    use slog::Drain;
-
+fn main() {
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let args = Args::from_args();
+
+    use slog::Drain;
 
     let log = match args.log {
         Log::Stderr => {
@@ -71,7 +70,22 @@ async fn main() {
         }
     };
 
-    start(args, log).await.expect("server failed")
+    use futures::future::FutureExt;
+
+    let mut builder = tokio::runtime::Builder::new();
+    builder
+        .threaded_scheduler()
+        .max_threads(args.max_threads)
+        .enable_all();
+
+    if let Some(n) = args.core_threads {
+        builder.core_threads(n);
+    }
+
+    builder
+        .build()
+        .unwrap()
+        .block_on(start(args, log).map(Result::unwrap))
 }
 
 /// Starts up a server.

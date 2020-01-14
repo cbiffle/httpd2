@@ -92,6 +92,16 @@ pub struct Args {
         value_name="SECS"
     )]
     pub connection_time_limit: Duration,
+    /// Core worker threads to maintain. These will be started immediately, and
+    /// kept alive while the server is idle, to respond to requests quickly. If
+    /// not provided, this will equal the number of CPUs.
+    #[structopt(long)]
+    pub core_threads: Option<usize>,
+    /// Maximum number of worker threads to start. Threads are started in
+    /// response to load, and shut down when not used. The actual thread count
+    /// will be above this number, because not all threads are workers.
+    #[structopt(long, default_value = "128")]
+    pub max_threads: usize,
 
     /// Path of directory to serve (and, if --chroot is provided, the new root
     /// directory).
