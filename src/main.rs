@@ -28,7 +28,9 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
-use self::args::{get_args, Args, Log};
+use structopt::StructOpt;
+
+use self::args::{Args, Log};
 use self::err::ServeError;
 use self::sync::SharedSemaphore;
 
@@ -39,10 +41,7 @@ async fn main() {
 
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
-    let args = match get_args() {
-        Ok(args) => args,
-        Err(e) => e.exit(),
-    };
+    let args = Args::from_args();
 
     let log = match args.log {
         Log::Stderr => {

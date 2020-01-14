@@ -26,6 +26,7 @@ slog = "2"
 slog-async = "2"
 slog-term = "2"
 slog-journald = {version = "2", optional = true}
+structopt = "0.3.7"
 
 [profile.release]
 debug = 2

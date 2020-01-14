@@ -7,25 +7,96 @@ use std::time::Duration;
 use clap::arg_enum;
 use hyper::header::HeaderValue;
 use nix::unistd::{Gid, Uid};
+use structopt::StructOpt;
 
-const DEFAULT_IP: std::net::Ipv6Addr = std::net::Ipv6Addr::UNSPECIFIED;
-const DEFAULT_PORT: u16 = 8000;
-
+#[derive(StructOpt)]
+#[structopt(name = "httpd2")]
 pub struct Args {
-    pub root: std::path::PathBuf,
-    pub key_path: std::path::PathBuf,
-    pub cert_path: std::path::PathBuf,
+    /// Path to the server private key file.
+    #[structopt(
+        short,
+        long,
+        default_value = "localhost.key",
+        value_name = "PATH"
+    )]
+    pub key_path: PathBuf,
+    /// Path to the server certificate file.
+    #[structopt(
+        short = "r",
+        long,
+        default_value = "localhost.crt",
+        value_name = "PATH"
+    )]
+    pub cert_path: PathBuf,
+    /// Specifies that the server should chroot into ROOT. You basically always
+    /// want ths, unless you're running the server as an unprivileged user.
+    #[structopt(short = "c", long = "chroot")]
     pub should_chroot: bool,
+    /// Address and port to bind.
+    #[structopt(
+        short = "A",
+        long,
+        default_value = "[::]:8000",
+        value_name = "ADDR:PORT"
+    )]
     pub addr: SocketAddr,
+    /// User to switch to via setuid before serving. Required if the server is
+    /// started as root.
+    #[structopt(
+        short = "U",
+        long,
+        parse(try_from_str = parse_uid),
+        value_name = "UID"
+    )]
     pub uid: Option<Uid>,
+    /// Group to switch to via setgid before serving.
+    #[structopt(
+        short = "G",
+        long,
+        parse(try_from_str=parse_gid),
+        value_name = "GID"
+    )]
     pub gid: Option<Gid>,
+    /// Send the HTTP Strict-Transport-Security header, instructing clients not
+    /// to use unencrypted HTTP to access this site.
+    #[structopt(long)]
     pub hsts: bool,
+    /// Send the upgrade-insecure-requests directive, instructing clients to
+    /// convert http URLs to https.
+    #[structopt(long)]
     pub upgrade: bool,
+    /// Selects a logging backend.
+    #[structopt(long, default_value = "stderr", value_name = "NAME")]
     pub log: Log,
+    /// How long our resources can be cached elsewhere, in seconds.
+    #[structopt(
+        long = "max-age",
+        default_value = "3600",
+        parse(try_from_str = cache_control),
+        value_name = "SECS"
+    )]
     pub cache_control: HeaderValue,
+    /// Maximum number of simultaneous connections to allow.
+    #[structopt(long, default_value = "100000", value_name = "COUNT")]
     pub max_connections: usize,
+    /// Maximum number of concurrent streams (HTTP/2) or pipelined requests
+    /// (HTTP/1.1) to allow per connection.
+    #[structopt(long, default_value = "10", value_name = "COUNT")]
     pub max_streams: u32,
+    /// Maximum duraiton of a connection in seconds. This timer elapses whether
+    /// or not the connection is active.
+    #[structopt(
+        long,
+        default_value = "181",
+        parse(try_from_str = seconds),
+        value_name="SECS"
+    )]
     pub connection_time_limit: Duration,
+
+    /// Path of directory to serve (and, if --chroot is provided, the new root
+    /// directory).
+    #[structopt(value_name = "ROOT")]
+    pub root: PathBuf,
 }
 
 // TODO: looks like Clap's arg_enum doesn't allow variant attributes.
@@ -46,169 +117,20 @@ arg_enum! {
     }
 }
 
-pub fn get_args() -> Result<Args, clap::Error> {
-    let matches = clap::App::new("httpd2")
-        .arg(
-            clap::Arg::with_name("chroot")
-                .short("c")
-                .long("chroot")
-                .help(
-                    "Specifies that the server should chroot into DIR. You\n\
-                     basically always want this, unless you're running the\n\
-                     server as an unprivileged user.",
-                ),
-        )
-        .arg(
-            clap::Arg::with_name("addr")
-                .short("A")
-                .long("addr")
-                .takes_value(true)
-                .value_name("ADDR:PORT")
-                .validator(is_sockaddr)
-                .help("Address and port to bind."),
-        )
-        .arg(
-            clap::Arg::with_name("uid")
-                .short("U")
-                .long("uid")
-                .takes_value(true)
-                .value_name("UID")
-                .validator(is_uid)
-                .help("User to switch to via setuid before serving."),
-        )
-        .arg(
-            clap::Arg::with_name("gid")
-                .short("G")
-                .long("gid")
-                .takes_value(true)
-                .value_name("GID")
-                .validator(is_gid)
-                .help("Group to switch to via setgid before serving."),
-        )
-        .arg(
-            clap::Arg::with_name("key_path")
-                .short("k")
-                .long("key-path")
-                .takes_value(true)
-                .value_name("PATH")
-                .default_value("localhost.key")
-                .help("Location of TLS private key."),
-        )
-        .arg(
-            clap::Arg::with_name("cert_path")
-                .short("r")
-                .long("cert-path")
-                .takes_value(true)
-                .value_name("PATH")
-                .default_value("localhost.crt")
-                .help("Location of TLS certificate."),
-        )
-        .arg(
-            clap::Arg::with_name("hsts")
-                .help("Whether to send the Strict-Transport-Security header")
-                .long("hsts"),
-        )
-        .arg(
-            clap::Arg::with_name("upgrade")
-                .help("Whether to send the upgrade-insecure-requests directive")
-                .long("upgrade"),
-        )
-        .arg(
-            clap::Arg::with_name("log")
-                .help("Selects a logging backend")
-                .long("log")
-                .short("l")
-                .possible_values(&Log::variants())
-                .default_value("stderr")
-                .case_insensitive(true),
-        )
-        .arg(
-            clap::Arg::with_name("max_age")
-                .help("How long resource can be cached, in seconds")
-                .long("max-age")
-                .takes_value(true)
-                .value_name("SECS")
-                .default_value("3600"),
-        )
-        .arg(
-            clap::Arg::with_name("max_connections")
-                .help("Max number of simultaneous connections to accept")
-                .long("max-connections")
-                .takes_value(true)
-                .value_name("COUNT")
-                .default_value("100000"),
-        )
-        .arg(
-            clap::Arg::with_name("max_streams")
-                .help("Max number of concurrent streams per connection")
-                .long("max-streams")
-                .takes_value(true)
-                .value_name("COUNT")
-                .default_value("10"),
-        )
-        .arg(
-            clap::Arg::with_name("connection_time_limit")
-                .help("Maximum duration a single connection can stay open.")
-                .long("max-conn-time")
-                .takes_value(true)
-                .value_name("SECS")
-                .default_value("181"),
-        )
-        .arg(
-            clap::Arg::with_name("DIR")
-                .help("Path to serve")
-                .required(true)
-                .index(1),
-        )
-        .get_matches();
+fn parse_uid(val: &str) -> Result<Uid, std::num::ParseIntError> {
+    val.parse::<libc::uid_t>().map(Uid::from_raw)
+}
 
-    fn is_uid(val: String) -> Result<(), String> {
-        val.parse::<libc::uid_t>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as UID".to_string())
-    }
+fn parse_gid(val: &str) -> Result<Gid, std::num::ParseIntError> {
+    val.parse::<libc::gid_t>().map(Gid::from_raw)
+}
 
-    fn is_gid(val: String) -> Result<(), String> {
-        val.parse::<libc::uid_t>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as GID".to_string())
-    }
+fn seconds(val: &str) -> Result<Duration, std::num::ParseFloatError> {
+    val.parse::<f64>().map(Duration::from_secs_f64)
+}
 
-    fn is_sockaddr(val: String) -> Result<(), String> {
-        val.parse::<SocketAddr>()
-            .map(|_| ())
-            .map_err(|_| "can't parse as addr:port".to_string())
-    }
-
-    use clap::value_t;
-
-    Ok(Args {
-        root: PathBuf::from(matches.value_of("DIR").unwrap()),
-        key_path: PathBuf::from(matches.value_of("key_path").unwrap()),
-        cert_path: PathBuf::from(matches.value_of("cert_path").unwrap()),
-        should_chroot: matches.is_present("chroot"),
-        addr: value_t!(matches, "addr", SocketAddr)
-            .unwrap_or(SocketAddr::from((DEFAULT_IP, DEFAULT_PORT))),
-
-        uid: matches
-            .value_of("uid")
-            .map(|uid| Uid::from_raw(uid.parse::<libc::uid_t>().unwrap())),
-        gid: matches
-            .value_of("gid")
-            .map(|gid| Gid::from_raw(gid.parse::<libc::gid_t>().unwrap())),
-
-        hsts: matches.is_present("hsts"),
-        upgrade: matches.is_present("upgrade"),
-        log: value_t!(matches, "log", Log).unwrap(),
-
-        cache_control: {
-            let max_age = value_t!(matches, "max_age", u64).unwrap();
-            HeaderValue::from_str(&format!("max-age={}", max_age)).unwrap()
-        },
-        max_connections: value_t!(matches, "max_connections", usize).unwrap(),
-        max_streams: value_t!(matches, "max_streams", u32).unwrap(),
-        connection_time_limit: Duration::from_secs(
-            value_t!(matches, "connection_time_limit", u64).unwrap(),
-        ),
+fn cache_control(val: &str) -> Result<HeaderValue, std::num::ParseIntError> {
+    val.parse::<u64>().map(|n| {
+        HeaderValue::from_str(&format!("cache-control: max-age={}", n)).unwrap()
     })
 }
