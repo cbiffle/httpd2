@@ -8,7 +8,10 @@ edition = "2018"
 
 [features]
 default = ["journald"]
+# Enable logging to journald.
 journald = ["slog-journald"]
+# Use the system allocator (intended for heap profiling only).
+system_allocator = []
 
 [dependencies]
 hyper = "0.13"

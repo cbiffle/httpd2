@@ -34,6 +34,10 @@ use self::args::{Args, Log};
 use self::err::ServeError;
 use self::sync::SharedSemaphore;
 
+#[cfg(feature = "system_allocator")]
+#[global_allocator]
+static GLOBAL: std::alloc::System = std::alloc::System;
+
 /// Main server entry point.
 #[tokio::main]
 async fn main() {
