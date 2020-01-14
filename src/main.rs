@@ -1,5 +1,6 @@
 mod args;
 mod err;
+mod log;
 mod percent;
 mod picky;
 mod serve;

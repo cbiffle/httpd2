@@ -12,8 +12,10 @@ use tokio_util::codec::{self, Decoder};
 
 use crate::args::Args;
 use crate::err::ServeError;
+use crate::log::OptionKV;
 use crate::picky::{self, File, FileOrDir};
 use crate::{percent, traversal};
+
 
 /// Attempts to serve a file in response to `req`.
 pub async fn files(
@@ -71,7 +73,8 @@ pub async fn files(
                 &log,
                 &mut sanitized,
                 accept_gzip,
-            ).await;
+            )
+            .await;
 
             match open_result {
                 Ok((FileOrDir::File(file), enc)) => {
@@ -113,10 +116,7 @@ pub async fn files(
                 }
                 Err(e) => {
                     *response.status_mut() = StatusCode::NOT_FOUND;
-                    ResponseInfo::Error(
-                        ErrorContext::Error(e),
-                        None,
-                    )
+                    ResponseInfo::Error(ErrorContext::Error(e), None)
                 }
             }
         }
@@ -133,11 +133,9 @@ pub async fn files(
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_gzip (no redirect) here.
         let mut redirect = "./errors/404.html".to_string();
-        let err_result = picky_open_with_redirect_and_gzip(
-            &log,
-            &mut redirect,
-            accept_gzip,
-        ).await;
+        let err_result =
+            picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
+                .await;
         if let Ok((FileOrDir::File(error_page), enc)) = err_result {
             *srv = Some(Served {
                 len: error_page.len,
@@ -148,46 +146,37 @@ pub async fn files(
         }
     }
 
+    let log_kv = slog::o!("status" => response.status().as_u16());
+    let srv_kv = match &response_info {
+        ResponseInfo::Error(_, os) | ResponseInfo::Success(os) => {
+            os.as_ref().map(|s| {
+                slog::o!(
+                    "len" => s.len,
+                    "enc" => s.encoding,
+                )
+            })
+        }
+    };
     match response_info {
-        ResponseInfo::Error(ErrorContext::Fixed(ctx), None) => slog::info!(
+        ResponseInfo::Error(ErrorContext::Fixed(ctx), _) => slog::info!(
             log,
             "response";
-            "status" => response.status().as_u16(),
+            log_kv,
             "err" => ctx,
+            OptionKV::from(srv_kv),
         ),
-        ResponseInfo::Error(ErrorContext::Fixed(ctx), Some(s)) => slog::info!(
+        ResponseInfo::Error(ErrorContext::Error(e), _) => slog::info!(
             log,
             "response";
-            "status" => response.status().as_u16(),
-            "err" => ctx,
-            "len" => s.len,
-            "enc" => s.encoding,
-        ),
-        ResponseInfo::Error(ErrorContext::Error(e), None) => slog::info!(
-            log,
-            "response";
-            "status" => response.status().as_u16(),
+            log_kv,
             "err" => %e,
+            OptionKV::from(srv_kv),
         ),
-        ResponseInfo::Error(ErrorContext::Error(e), Some(s)) => slog::info!(
+        ResponseInfo::Success(_) => slog::info!(
             log,
             "response";
-            "status" => response.status().as_u16(),
-            "err" => %e,
-            "len" => s.len,
-            "enc" => s.encoding,
-        ),
-        ResponseInfo::Success(None) => slog::info!(
-            log,
-            "response";
-            "status" => response.status().as_u16(),
-        ),
-        ResponseInfo::Success(Some(s)) => slog::info!(
-            log,
-            "response";
-            "status" => response.status().as_u16(),
-            "len" => s.len,
-            "enc" => s.encoding,
+            log_kv,
+            OptionKV::from(srv_kv),
         ),
     }
 

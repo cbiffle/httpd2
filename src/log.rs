@@ -1,0 +1,22 @@
+//! Logging support code.
+
+pub struct OptionKV<T>(Option<T>);
+
+impl<T> From<Option<T>> for OptionKV<T> {
+    fn from(o: Option<T>) -> Self {
+        OptionKV(o)
+    }
+}
+
+impl<T: slog::KV> slog::KV for OptionKV<T> {
+    fn serialize(
+        &self, 
+        record: &slog::Record, 
+        serializer: &mut dyn slog::Serializer
+    ) -> slog::Result {
+        match &self.0 {
+            None => Ok(()),
+            Some(kv) => kv.serialize(record, serializer),
+        }
+    }
+}
