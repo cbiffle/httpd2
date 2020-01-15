@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -182,7 +181,7 @@ pub async fn files(
 
 enum ErrorContext {
     Fixed(&'static str),
-    Error(io::Error),
+    Error(picky::Error),
 }
 
 enum ResponseInfo {
@@ -256,7 +255,7 @@ fn set_file_as_body(response: &mut Response<Body>, file: File) {
 async fn picky_open_with_redirect(
     log: &slog::Logger,
     path: &mut String,
-) -> Result<FileOrDir, io::Error> {
+) -> Result<FileOrDir, picky::Error> {
     // Performance optimization: if the path is *syntactically* a directory,
     // i.e. it ends in a slash, pre-append the `index.html`. This reduces
     // filesystem round trips (and thus the number of blocking operations
@@ -294,7 +293,7 @@ async fn picky_open_with_redirect_and_gzip(
     log: &slog::Logger,
     path: &mut String,
     accept_gzip: bool,
-) -> Result<(FileOrDir, Option<&'static str>), io::Error> {
+) -> Result<(FileOrDir, Option<&'static str>), picky::Error> {
     match picky_open_with_redirect(log, path).await? {
         FileOrDir::File(file) if accept_gzip => {
             slog::debug!(log, "checking for precompressed alternate");

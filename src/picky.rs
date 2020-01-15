@@ -49,7 +49,7 @@ pub async fn open(
     log: &slog::Logger,
     path: &Path,
     infer_content_type: impl FnOnce(&Path) -> &'static str,
-) -> Result<FileOrDir, io::Error> {
+) -> Result<FileOrDir, Error> {
     slog::debug!(log, "picky_open({:?})", path);
 
     let file = fs::File::open(path).await.map_err(|e| {
@@ -61,7 +61,7 @@ pub async fn open(
 
     if mode & 0o444 != 0o444 || mode & 0o101 == 0o001 {
         slog::debug!(log, "mode {:#o} is not OK", mode);
-        Err(io::Error::new(io::ErrorKind::NotFound, "perms"))
+        Err(Error::BadMode(mode))
     } else if meta.is_file() {
         slog::debug!(log, "opened");
         Ok(FileOrDir::File(File {
@@ -75,6 +75,29 @@ pub async fn open(
         Ok(FileOrDir::Dir)
     } else {
         slog::debug!(log, "neither file nor dir");
-        Err(io::Error::new(io::ErrorKind::NotFound, "type"))
+        Err(Error::NotFileOrDir)
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    BadMode(u32),
+    NotFileOrDir,
+    Io(io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::BadMode(x) => write!(f, "mode {:#o}", x),
+            Self::NotFileOrDir => f.write_str("not file or dir"),
+            Self::Io(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
     }
 }
