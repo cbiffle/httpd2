@@ -21,33 +21,7 @@ pub async fn files(
     log: slog::Logger,
     req: Request<Body>,
 ) -> Result<Response<Body>, ServeError> {
-    let mut response = Response::new(Body::empty());
-
-    // Fetch the date of the caller's cached copy. We bump this forward by one
-    // second because httpdate truncates outgoing timestamps, causing the
-    // higher-precision filesystem timestamps to almost always be *after* the
-    // IMS timestamp due to non-zero nanoseconds.
-    // Pro: caching works.
-    // Con: multiple updates in less than a second may be missed.
-    let if_modified_since = req
-        .headers()
-        .get(hyper::header::IF_MODIFIED_SINCE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| httpdate::parse_http_date(value).ok())
-        .map(|ims| ims + Duration::from_secs(1));
-    slog::debug!(log, "IMS: {:?}", if_modified_since);
-
-    // Scan the request headers to see if gzip compressed responses are OK.
-    let mut accept_gzip = false;
-    for list in req.headers().get_all(hyper::header::ACCEPT_ENCODING).iter() {
-        if let Ok(list) = list.to_str() {
-            if list.split(",").any(|item| item.trim() == "gzip") {
-                accept_gzip = true;
-                break;
-            }
-        }
-    }
-
+    // We log all requests, whether or not they will be served.
     let method = req.method();
     let uri = req.uri();
     slog::info!(
@@ -57,12 +31,34 @@ pub async fn files(
         "version" => ?req.version(),
     );
 
-    // Process GET requests.
+    // Other than logging, we defer work to the latest reasonable point, to
+    // reduce the load of bogus requests on the server. This means that bogus
+    // requests will incur lower latency than legit ones, but the only
+    // side-channel that opens should be the ability to probe what public files
+    // exist on the filesystem ... which is exactly what the HTTP server is for.
+
+    let mut response = Response::new(Body::empty());
+
+    let mut accept_gzip = false;
     let mut response_info = match (method, uri.path()) {
         (&Method::GET, path) | (&Method::HEAD, path) => {
             // Sanitize the path using a derivative of publicfile's algorithm.
             // It appears that Hyper blocks non-ASCII characters.
             let mut sanitized = sanitize_path(path);
+
+            // Scan the request headers to see if gzip compressed responses are
+            // OK. We need to do this before consulting the filesystem, but it's
+            // fairly quick.
+            for list in
+                req.headers().get_all(hyper::header::ACCEPT_ENCODING).iter()
+            {
+                if let Ok(list) = list.to_str() {
+                    if list.split(",").any(|item| item.trim() == "gzip") {
+                        accept_gzip = true;
+                        break;
+                    }
+                }
+            }
 
             // Now, see what the path yields.
             let open_result = picky_open_with_redirect_and_gzip(
@@ -74,6 +70,21 @@ pub async fn files(
 
             match open_result {
                 Ok((file, enc)) => {
+                    // Parse the date of the caller's cached copy. We bump this
+                    // forward by one second because httpdate truncates outgoing
+                    // timestamps, causing the higher-precision filesystem
+                    // timestamps to almost always be *after* the IMS timestamp
+                    // due to non-zero nanoseconds.
+                    // Pro: caching works.
+                    // Con: multiple updates in less than a second may be
+                    // missed.
+                    let if_modified_since = req
+                        .headers()
+                        .get(hyper::header::IF_MODIFIED_SINCE)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| httpdate::parse_http_date(value).ok())
+                        .map(|ims| ims + Duration::from_secs(1));
+
                     let cached = if_modified_since
                         .map(|ims| file.modified <= ims)
                         .unwrap_or(false);
