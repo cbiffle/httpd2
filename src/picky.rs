@@ -7,16 +7,6 @@ use std::time::SystemTime;
 
 use tokio::fs;
 
-/// Possible successful results from `open`.
-#[derive(Debug)]
-pub enum FileOrDir {
-    /// We found a directory.
-    Dir,
-    /// We found a regular file, with permissions set such that we're willing to
-    /// admit it exists.
-    File(File),
-}
-
 /// Information about an open file, including the file handle.
 #[derive(Debug)]
 pub struct File {
@@ -43,13 +33,13 @@ pub struct File {
 /// 3. Files that are world-X but not user-X are rejected, for reasons inherited
 ///    from publicfile that I don't quite recall.
 ///
-/// If the path turns out to be a directory, returns `FileOrDir::Dir` only if it
-/// meets all the above criteria.
+/// If the path turns out to be a directory, returns `Error::Directory` only if
+/// it meets all the above criteria, otherwise you'll get `Error::BadMode`.
 pub async fn open(
     log: &slog::Logger,
     path: &Path,
     infer_content_type: impl FnOnce(&Path) -> &'static str,
-) -> Result<FileOrDir, Error> {
+) -> Result<File, Error> {
     slog::debug!(log, "picky_open({:?})", path);
 
     let file = fs::File::open(path).await.map_err(|e| {
@@ -64,25 +54,26 @@ pub async fn open(
         Err(Error::BadMode(mode))
     } else if meta.is_file() {
         slog::debug!(log, "opened");
-        Ok(FileOrDir::File(File {
+        Ok(File {
             file,
             len: meta.len(),
             modified: meta.modified().unwrap(),
             content_type: infer_content_type(path),
-        }))
+        })
     } else if meta.is_dir() {
         slog::debug!(log, "found dir");
-        Ok(FileOrDir::Dir)
+        Err(Error::Directory)
     } else {
         slog::debug!(log, "neither file nor dir");
-        Err(Error::NotFileOrDir)
+        Err(Error::SpecialFile)
     }
 }
 
 #[derive(Debug)]
 pub enum Error {
     BadMode(u32),
-    NotFileOrDir,
+    Directory,
+    SpecialFile,
     Io(io::Error),
 }
 
@@ -90,7 +81,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::BadMode(x) => write!(f, "mode {:#o}", x),
-            Self::NotFileOrDir => f.write_str("not file or dir"),
+            Self::Directory => f.write_str("is dir"),
+            Self::SpecialFile => f.write_str("is special"),
             Self::Io(e) => std::fmt::Display::fmt(e, f),
         }
     }

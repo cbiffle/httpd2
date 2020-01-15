@@ -12,7 +12,7 @@ use tokio_util::codec::{self, Decoder};
 use crate::args::Args;
 use crate::err::ServeError;
 use crate::log::OptionKV;
-use crate::picky::{self, File, FileOrDir};
+use crate::picky::{self, File};
 use crate::{percent, traversal};
 
 /// Attempts to serve a file in response to `req`.
@@ -73,7 +73,7 @@ pub async fn files(
             .await;
 
             match open_result {
-                Ok((FileOrDir::File(file), enc)) => {
+                Ok((file, enc)) => {
                     let cached = if_modified_since
                         .map(|ims| file.modified <= ims)
                         .unwrap_or(false);
@@ -97,19 +97,6 @@ pub async fn files(
                         ResponseInfo::Success(None)
                     }
                 }
-                // To avoid disclosing information, we signal any other case
-                // as 404. Cases covered here include:
-                // - Actual file not found.
-                // - Permissions did not permit file to be served.
-                // - One level of directory redirect followed, but still
-                //   found a directory.
-                Ok(_) => {
-                    *response.status_mut() = StatusCode::NOT_FOUND;
-                    ResponseInfo::Error(
-                        ErrorContext::Fixed("would serve directory"),
-                        None,
-                    )
-                }
                 Err(e) => {
                     *response.status_mut() = StatusCode::NOT_FOUND;
                     ResponseInfo::Error(ErrorContext::Error(e), None)
@@ -132,7 +119,7 @@ pub async fn files(
         let err_result =
             picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
                 .await;
-        if let Ok((FileOrDir::File(error_page), enc)) = err_result {
+        if let Ok((error_page, enc)) = err_result {
             *srv = Some(Served {
                 len: error_page.len,
                 encoding: enc.unwrap_or("raw"),
@@ -255,23 +242,24 @@ fn set_file_as_body(response: &mut Response<Body>, file: File) {
 async fn picky_open_with_redirect(
     log: &slog::Logger,
     path: &mut String,
-) -> Result<FileOrDir, picky::Error> {
+) -> Result<File, picky::Error> {
     // Performance optimization: if the path is *syntactically* a directory,
     // i.e. it ends in a slash, pre-append the `index.html`. This reduces
     // filesystem round trips (and thus the number of blocking operations
     // affecting the thread pool) by 1, and improved a particular load benchmark
     // by 18% at the time of writing.
-    if path.ends_with("/") {
+    let trailing_slash = path.ends_with("/");
+    if trailing_slash {
         path.push_str("index.html");
     }
 
-    match picky::open(log, Path::new(path), map_content_type).await? {
-        FileOrDir::Dir => {
+    match picky::open(log, Path::new(path), map_content_type).await {
+        Err(picky::Error::Directory) if !trailing_slash => {
             slog::debug!(log, "--> index.html");
             path.push_str("/index.html");
             picky::open(log, Path::new(path), map_content_type).await
         }
-        r => Ok(r),
+        r => r,
     }
 }
 
@@ -287,40 +275,48 @@ async fn picky_open_with_redirect(
 /// Importantly, the content-type judgment for the *original*, non-compressed
 /// file, is preserved.
 ///
-/// Returns the normal `FileOrDir` result, plus an optional `Content-Encoding`
-/// value if an alternate encoding was selected.
+/// Returns the normal `File` result, plus an optional `Content-Encoding` value
+/// if an alternate encoding was selected.
 async fn picky_open_with_redirect_and_gzip(
     log: &slog::Logger,
     path: &mut String,
     accept_gzip: bool,
-) -> Result<(FileOrDir, Option<&'static str>), picky::Error> {
-    match picky_open_with_redirect(log, path).await? {
-        FileOrDir::File(file) if accept_gzip => {
-            slog::debug!(log, "checking for precompressed alternate");
-            path.push_str(".gz");
-            // Note that we're "inferring" the old content-type.
-            match picky::open(log, Path::new(path), |_| file.content_type).await
-            {
-                Ok(FileOrDir::File(cfile))
-                    if cfile.modified >= file.modified =>
-                {
-                    slog::debug!(log, "serving gzip");
-                    // Preserve mod date of original content.
-                    Ok((
-                        FileOrDir::File(File {
-                            modified: file.modified,
-                            ..cfile
-                        }),
-                        Some("gzip"),
-                    ))
-                }
-                _ => {
-                    slog::debug!(log, "serving uncompressed");
-                    Ok((FileOrDir::File(file), None))
-                }
-            }
+) -> Result<(File, Option<&'static str>), picky::Error> {
+    let file = picky_open_with_redirect(log, path).await?;
+
+    if !accept_gzip {
+        return Ok((file, None));
+    }
+
+    open_precompressed(log, path, file).await
+}
+
+async fn open_precompressed(
+    log: &slog::Logger,
+    path: &mut String,
+    file: File,
+) -> Result<(File, Option<&'static str>), picky::Error> {
+    slog::debug!(log, "checking for precompressed alternate");
+    path.push_str(".gz");
+    // Note that we're "inferring" the old content-type.
+    match picky::open(log, Path::new(path), |_| file.content_type).await {
+        Ok(cfile) if cfile.modified >= file.modified => {
+            slog::debug!(log, "serving gzip");
+            // Preserve mod date of original content.
+            Ok((
+                File {
+                    modified: file.modified,
+                    ..cfile
+                },
+                Some("gzip"),
+            ))
         }
-        any => Ok((any, None)),
+        _ => {
+            // If the compressed alternative isn't available, or if it
+            // predates the actual content, ignore it.
+            slog::debug!(log, "serving uncompressed");
+            Ok((file, None))
+        }
     }
 }
 
