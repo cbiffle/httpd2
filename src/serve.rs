@@ -125,7 +125,7 @@ pub async fn files(
         slog::debug!(log, "searching for error page");
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_gzip (no redirect) here.
-        let mut redirect = "./errors/404.html".to_string();
+        let mut redirect = format!("./errors/{:03}.html", response.status().as_u16());
         let err_result =
             picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
                 .await;
