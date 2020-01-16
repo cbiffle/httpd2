@@ -77,13 +77,8 @@ fn main() {
     builder
         .threaded_scheduler()
         .max_threads(args.max_threads)
-        .enable_all();
-
-    if let Some(n) = args.core_threads {
-        builder.core_threads(n);
-    }
-
-    builder
+        .core_threads(args.core_threads.unwrap_or_else(|| num_cpus::get()))
+        .enable_all()
         .build()
         .unwrap()
         .block_on(start(args, log).map(Result::unwrap))
