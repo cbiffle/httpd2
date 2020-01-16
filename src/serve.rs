@@ -36,10 +36,8 @@ pub async fn files(
     // side-channel that opens should be the ability to probe what public files
     // exist on the filesystem ... which is exactly what the HTTP server is for.
 
-    let mut response = Response::new(Body::empty());
-
     let mut accept_gzip = false;
-    let mut response_info = match (method, uri.path()) {
+    let (mut response, mut response_info) = match (method, uri.path()) {
         (&Method::GET, path) | (&Method::HEAD, path) => {
             // Sanitize the path using a derivative of publicfile's algorithm.
             // It appears that Hyper blocks non-ASCII characters.
@@ -79,63 +77,49 @@ pub async fn files(
                         .get(hyper::header::IF_MODIFIED_SINCE)
                         .and_then(|value| value.to_str().ok());
 
-                    let modified = httpdate::fmt_http_date(file.modified);
-
-                    let cached = if_modified_since == Some(&*modified);
-
-                    set_response_headers(
+                    let (resp, srv) = serve_file(
                         &*args,
-                        &mut response,
-                        &file,
-                        Some(modified),
+                        file,
                         enc,
+                        if_modified_since,
+                        method == Method::GET,
                     );
-
-                    if method == Method::GET {
-                        if cached {
-                            *response.status_mut() = StatusCode::NOT_MODIFIED;
-                            ResponseInfo::Success(None)
-                        } else {
-                            let len = file.len;
-                            set_file_as_body(&mut response, file);
-                            ResponseInfo::Success(Some(Served {
-                                len,
-                                encoding: enc.unwrap_or("raw"),
-                            }))
-                        }
-                    } else {
-                        ResponseInfo::Success(None)
-                    }
+                    (resp, ResponseInfo::Success(srv))
                 }
-                Err(e) => {
-                    *response.status_mut() = StatusCode::NOT_FOUND;
-                    ResponseInfo::Error(ErrorContext::Error(e), None)
-                }
+                Err(e) => (
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::empty())
+                        .unwrap(),
+                    ResponseInfo::Error(ErrorContext::Error(e), None),
+                ),
             }
         }
-        _ => {
-            // Any other request method falls here.
-            *response.status_mut() = StatusCode::NOT_FOUND;
-            ResponseInfo::Error(ErrorContext::Fixed("bad method"), None)
-        }
+        // Any other request method falls here.
+        _ => (
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap(),
+            ResponseInfo::Error(ErrorContext::Fixed("bad method"), None),
+        ),
     };
 
     if let ResponseInfo::Error(_, srv) = &mut response_info {
         // Attempt to present the user with an error page.
         slog::debug!(log, "searching for error page");
+
+        let mut redirect =
+            format!("./errors/{:03}.html", response.status().as_u16());
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_gzip (no redirect) here.
-        let mut redirect = format!("./errors/{:03}.html", response.status().as_u16());
         let err_result =
             picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
                 .await;
         if let Ok((error_page, enc)) = err_result {
-            *srv = Some(Served {
-                len: error_page.len,
-                encoding: enc.unwrap_or("raw"),
-            });
-            set_response_headers(&*args, &mut response, &error_page, None, enc);
-            set_file_as_body(&mut response, error_page);
+            let (r, s) = serve_file(&*args, error_page, enc, None, true);
+            response = r;
+            *srv = s;
         }
     }
 
@@ -191,38 +175,41 @@ struct Served {
     encoding: &'static str,
 }
 
-fn set_response_headers(
+/// Generates a `Response` with common headers initialized, and an empty body.
+///
+/// `args` is used to customize generation of some headers.
+///
+/// `len`, `content_type`, and `modified` are metadata of the file being served.
+///
+/// `enc` gives the content-encoding of the file, if it is not being served
+/// plain.
+fn start_response(
     args: &Args,
-    response: &mut Response<Body>,
-    file: &File,
-    modified_fmt: Option<String>,
-    enc: Option<&'static str>,
-) {
+    len: u64,
+    content_type: &'static str,
+    modified: &str,
+    enc: Option<Encoding>,
+) -> Response<Body> {
+    let mut response = Response::new(Body::empty());
+
     let headers = response.headers_mut();
 
-    headers.insert(hyper::header::CONTENT_LENGTH, file.len.into());
+    headers.insert(hyper::header::CONTENT_LENGTH, len.into());
     headers.insert(
         hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static(file.content_type),
-    );
-    headers.insert(
-        hyper::header::LAST_MODIFIED,
-        HeaderValue::from_str(
-            &modified_fmt
-                .unwrap_or_else(|| httpdate::fmt_http_date(file.modified)),
-        )
-        .unwrap(),
+        HeaderValue::from_static(content_type),
     );
     headers.insert(
         hyper::header::VARY,
         HeaderValue::from_name(hyper::header::ACCEPT_ENCODING),
     );
     headers.insert(hyper::header::CACHE_CONTROL, args.cache_control.clone());
+    headers.insert(
+        hyper::header::LAST_MODIFIED,
+        HeaderValue::from_str(modified).unwrap(),
+    );
     if let Some(enc) = enc {
-        headers.insert(
-            hyper::header::CONTENT_ENCODING,
-            HeaderValue::from_static(enc),
-        );
+        headers.insert(hyper::header::CONTENT_ENCODING, enc.into());
     }
     if args.hsts {
         headers.insert(
@@ -238,14 +225,7 @@ fn set_response_headers(
             HeaderValue::from_static("upgrade-insecure-requests;"),
         );
     }
-}
-
-fn set_file_as_body(response: &mut Response<Body>, file: File) {
-    *response.body_mut() = Body::wrap_stream(
-        codec::BytesCodec::new()
-            .framed(file.file)
-            .map(|b| b.map(bytes::BytesMut::freeze)),
-    );
+    response
 }
 
 /// Extends `picky::open` with directory redirect handling.
@@ -296,7 +276,7 @@ async fn picky_open_with_redirect_and_gzip(
     log: &slog::Logger,
     path: &mut String,
     accept_gzip: bool,
-) -> Result<(File, Option<&'static str>), picky::Error> {
+) -> Result<(File, Option<Encoding>), picky::Error> {
     let file = picky_open_with_redirect(log, path).await?;
 
     if !accept_gzip {
@@ -310,7 +290,7 @@ async fn open_precompressed(
     log: &slog::Logger,
     path: &mut String,
     file: File,
-) -> Result<(File, Option<&'static str>), picky::Error> {
+) -> Result<(File, Option<Encoding>), picky::Error> {
     slog::debug!(log, "checking for precompressed alternate");
     path.push_str(".gz");
     // Note that we're "inferring" the old content-type.
@@ -323,7 +303,7 @@ async fn open_precompressed(
                     modified: file.modified,
                     ..cfile
                 },
-                Some("gzip"),
+                Some(Encoding::Gzip),
             ))
         }
         _ => {
@@ -351,6 +331,65 @@ fn map_content_type(path: &Path) -> &'static str {
 
 fn sanitize_path(path: &str) -> String {
     traversal::sanitize(percent::decode(path.chars())).collect()
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Encoding {
+    Gzip,
+}
+
+impl From<Encoding> for HeaderValue {
+    fn from(e: Encoding) -> Self {
+        match e {
+            Encoding::Gzip => HeaderValue::from_static("gzip"),
+        }
+    }
+}
+
+fn serve_file(
+    args: &Args,
+    file: File,
+    encoding: Option<Encoding>,
+    if_modified_since: Option<&str>,
+    send_body: bool,
+) -> (Response<Body>, Option<Served>) {
+    // Go ahead and format the modification date as a string, since we'll need
+    // it for the response headers and the if-modified-since check (where
+    // relevant).
+    let modified = httpdate::fmt_http_date(file.modified);
+
+    // Check if-modified-since before handing off the modified string.
+    let cached = if_modified_since == Some(&*modified);
+
+    // Construct the basic response.
+    let mut response =
+        start_response(args, file.len, file.content_type, &*modified, encoding);
+
+    // Affix a body if required.
+    if send_body {
+        if cached {
+            *response.status_mut() = StatusCode::NOT_MODIFIED;
+            (response, None)
+        } else {
+            *response.body_mut() = Body::wrap_stream(
+                codec::BytesCodec::new()
+                    .framed(file.file)
+                    .map(|b| b.map(bytes::BytesMut::freeze)),
+            );
+            (
+                response,
+                Some(Served {
+                    len: file.len,
+                    encoding: match encoding {
+                        None => "raw",
+                        Some(Encoding::Gzip) => "gzip",
+                    },
+                }),
+            )
+        }
+    } else {
+        (response, None)
+    }
 }
 
 #[cfg(test)]
