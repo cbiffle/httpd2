@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use hyper::header::HeaderValue;
 use hyper::{Body, Method, Request, Response, StatusCode};
@@ -70,27 +69,27 @@ pub async fn files(
 
             match open_result {
                 Ok((file, enc)) => {
-                    // Parse the date of the caller's cached copy. We bump this
-                    // forward by one second because httpdate truncates outgoing
-                    // timestamps, causing the higher-precision filesystem
-                    // timestamps to almost always be *after* the IMS timestamp
-                    // due to non-zero nanoseconds.
-                    // Pro: caching works.
-                    // Con: multiple updates in less than a second may be
-                    // missed.
+                    // Collect the caller's cache date, if present. Because the
+                    // date format is fixed as of HTTP/1.1, and because caches
+                    // send the *exact* previous date in if-modified-since, we
+                    // can get away with doing an exact bytewise date comparison
+                    // rather than parsing.
                     let if_modified_since = req
                         .headers()
                         .get(hyper::header::IF_MODIFIED_SINCE)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| httpdate::parse_http_date(value).ok())
-                        .map(|ims| ims + Duration::from_secs(1));
+                        .and_then(|value| value.to_str().ok());
 
-                    let cached = if_modified_since
-                        .map(|ims| file.modified <= ims)
-                        .unwrap_or(false);
-                    slog::debug!(log, "modified={:?}", file.modified);
+                    let modified = httpdate::fmt_http_date(file.modified);
 
-                    set_response_headers(&*args, &mut response, &file, enc);
+                    let cached = if_modified_since == Some(&*modified);
+
+                    set_response_headers(
+                        &*args,
+                        &mut response,
+                        &file,
+                        Some(modified),
+                        enc,
+                    );
 
                     if method == Method::GET {
                         if cached {
@@ -135,7 +134,7 @@ pub async fn files(
                 len: error_page.len,
                 encoding: enc.unwrap_or("raw"),
             });
-            set_response_headers(&*args, &mut response, &error_page, enc);
+            set_response_headers(&*args, &mut response, &error_page, None, enc);
             set_file_as_body(&mut response, error_page);
         }
     }
@@ -196,6 +195,7 @@ fn set_response_headers(
     args: &Args,
     response: &mut Response<Body>,
     file: &File,
+    modified_fmt: Option<String>,
     enc: Option<&'static str>,
 ) {
     let headers = response.headers_mut();
@@ -207,7 +207,11 @@ fn set_response_headers(
     );
     headers.insert(
         hyper::header::LAST_MODIFIED,
-        HeaderValue::from_str(&httpdate::fmt_http_date(file.modified)).unwrap(),
+        HeaderValue::from_str(
+            &modified_fmt
+                .unwrap_or_else(|| httpdate::fmt_http_date(file.modified)),
+        )
+        .unwrap(),
     );
     headers.insert(
         hyper::header::VARY,
