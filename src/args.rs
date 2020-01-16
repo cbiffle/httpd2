@@ -83,7 +83,7 @@ pub struct Args {
     /// (HTTP/1.1) to allow per connection.
     #[structopt(long, default_value = "10", value_name = "COUNT")]
     pub max_streams: u32,
-    /// Maximum duraiton of a connection in seconds. This timer elapses whether
+    /// Maximum duration of a connection in seconds. This timer elapses whether
     /// or not the connection is active.
     #[structopt(
         long,
