@@ -325,6 +325,7 @@ fn map_content_type(path: &Path) -> &'static str {
         Some("js") => "text/javascript",
         Some("woff2") => "font/woff2",
         Some("png") => "image/png",
+        Some("xml") => "application/xml",
         _ => "text/plain",
     }
 }
