@@ -73,11 +73,10 @@ fn main() {
 
     use futures::future::FutureExt;
 
-    let mut builder = tokio::runtime::Builder::new();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
-        .threaded_scheduler()
-        .max_threads(args.max_threads)
-        .core_threads(args.core_threads.unwrap_or_else(|| num_cpus::get()))
+        .max_blocking_threads(args.max_threads)
+        .worker_threads(args.core_threads.unwrap_or_else(|| num_cpus::get()))
         .enable_all()
         .build()
         .unwrap()
@@ -106,7 +105,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 
     let (key, cert_chain) = load_key_and_cert(&args.key_path, &args.cert_path)?;
 
-    let mut listener = tokio::net::TcpListener::bind(&args.addr).await?;
+    let listener = tokio::net::TcpListener::bind(&args.addr).await?;
 
     // Dropping privileges here...
     drop_privs(&log, &args)?;

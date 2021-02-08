@@ -2,10 +2,11 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::stream::StreamExt;
+
 use hyper::header::HeaderValue;
 use hyper::{Body, Method, Request, Response, StatusCode};
 
-use tokio::stream::StreamExt;
 use tokio_util::codec::{self, Decoder};
 
 use crate::args::Args;
