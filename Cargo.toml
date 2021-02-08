@@ -22,7 +22,7 @@ tokio-rustls = "0.12.2"
 nix = "0.16.1"
 clap = "2.33"
 libc = "0.2.66"
-tokio-util = "0.2.0"
+tokio-util = {version = "0.2.0", features = ["codec"]}
 bytes = "0.5.3"
 httpdate = "0.3"
 slog = "2"
