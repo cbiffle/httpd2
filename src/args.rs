@@ -10,7 +10,7 @@ use nix::unistd::{Gid, Uid};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
-#[structopt(name = "httpd2")]
+#[structopt(name = "httpd2", set_term_width = 80)]
 pub struct Args {
     /// Path to the server private key file.
     #[structopt(
@@ -97,10 +97,12 @@ pub struct Args {
     /// not provided, this will equal the number of CPUs.
     #[structopt(long)]
     pub core_threads: Option<usize>,
-    /// Maximum number of worker threads to start. Threads are started in
-    /// response to load, and shut down when not used. The actual thread count
-    /// will be above this number, because not all threads are workers.
-    #[structopt(long, default_value = "128")]
+    /// Maximum number of worker threads to start, to handle blocking filesystem
+    /// operations. Threads are started in response to load, and shut down when
+    /// not used. The actual thread count will be above this number, because not
+    /// all threads are workers. Larger numbers will improve performance for
+    /// large numbers of concurrent requests, at the expense of RAM.
+    #[structopt(long, default_value = "10")]
     pub max_threads: usize,
 
     /// Path of directory to serve (and, if --chroot is provided, the new root
