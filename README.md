@@ -123,6 +123,7 @@ $ PKG_CONFIG_ALLOW_CROSS=1 cargo build --release --target=x86_64-unknown-linux-m
 
 ## More docs
 
+- [Manual](doc/manual.md)
 - [My analysis of this program vs `publicfile`.](doc/vs.md)
 
 [`publicfile`]: https://cr.yp.to/publicfile.html
