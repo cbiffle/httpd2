@@ -41,11 +41,12 @@ static GLOBAL: std::alloc::System = std::alloc::System;
 
 /// Main server entry point.
 fn main() {
+    use futures::future::FutureExt;
+    use slog::Drain;
+
     // Go ahead and parse arguments before dropping privileges, since they
     // control whether we drop privileges, among other things.
     let args = Args::from_args();
-
-    use slog::Drain;
 
     let log = match args.log {
         Log::Stderr => {
@@ -71,12 +72,10 @@ fn main() {
         }
     };
 
-    use futures::future::FutureExt;
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .max_blocking_threads(args.max_threads)
-        .worker_threads(args.core_threads.unwrap_or_else(|| num_cpus::get()))
+        .worker_threads(args.core_threads.unwrap_or_else(num_cpus::get))
         .enable_all()
         .build()
         .unwrap()

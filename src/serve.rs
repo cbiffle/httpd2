@@ -47,15 +47,14 @@ pub async fn files(
             // Scan the request headers to see if gzip compressed responses are
             // OK. We need to do this before consulting the filesystem, but it's
             // fairly quick.
-            for list in
-                req.headers().get_all(hyper::header::ACCEPT_ENCODING).iter()
+            if req
+                .headers()
+                .get_all(hyper::header::ACCEPT_ENCODING)
+                .iter()
+                .filter_map(|list| list.to_str().ok())
+                .any(|list| list.split(',').any(|item| item.trim() == "gzip"))
             {
-                if let Ok(list) = list.to_str() {
-                    if list.split(",").any(|item| item.trim() == "gzip") {
-                        accept_gzip = true;
-                        break;
-                    }
-                }
+                accept_gzip = true;
             }
 
             // Now, see what the path yields.
@@ -244,7 +243,7 @@ async fn picky_open_with_redirect(
     // filesystem round trips (and thus the number of blocking operations
     // affecting the thread pool) by 1, and improved a particular load benchmark
     // by 18% at the time of writing.
-    let trailing_slash = path.ends_with("/");
+    let trailing_slash = path.ends_with('/');
     if trailing_slash {
         path.push_str("index.html");
     }
@@ -296,13 +295,13 @@ async fn open_precompressed(
     path.push_str(".gz");
     // Note that we're "inferring" the old content-type.
     match picky::open(log, Path::new(path), |_| file.content_type).await {
-        Ok(cfile) if cfile.modified >= file.modified => {
+        Ok(gzfile) if gzfile.modified >= file.modified => {
             slog::debug!(log, "serving gzip");
             // Preserve mod date of original content.
             Ok((
                 File {
                     modified: file.modified,
-                    ..cfile
+                    ..gzfile
                 },
                 Some(Encoding::Gzip),
             ))

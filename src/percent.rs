@@ -45,9 +45,9 @@ impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
     fn next(&mut self) -> Option<Self::Item> {
         fn hexit(c: char) -> Option<u8> {
             match c {
-                '0'..='9' => Some(c as u8 - '0' as u8),
-                'A'..='F' => Some(c as u8 - 'A' as u8 + 10),
-                'a'..='f' => Some(c as u8 - 'a' as u8 + 10),
+                '0'..='9' => Some(c as u8 - b'0'),
+                'A'..='F' => Some(c as u8 - b'A' + 10),
+                'a'..='f' => Some(c as u8 - b'a' + 10),
                 _ => None,
             }
         }
@@ -59,9 +59,8 @@ impl<I: Iterator<Item = char>> Iterator for PercentDecoder<I> {
                         if let Some(y) = self.inner.next() {
                             if let (Some(x), Some(y)) = (hexit(x), hexit(y)) {
                                 return Some((x << 4 | y) as char);
-                            } else {
-                                self.state = PercentState::Unspool2(x, y);
                             }
+                            self.state = PercentState::Unspool2(x, y);
                         } else {
                             self.state = PercentState::Unspool(x);
                         }

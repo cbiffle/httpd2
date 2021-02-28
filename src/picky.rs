@@ -83,7 +83,7 @@ impl std::fmt::Display for Error {
             Self::BadMode(x) => write!(f, "mode {:#o}", x),
             Self::Directory => f.write_str("is dir"),
             Self::SpecialFile => f.write_str("is special"),
-            Self::Io(e) => std::fmt::Display::fmt(e, f),
+            Self::Io(e) => e.fmt(f),
         }
     }
 }
