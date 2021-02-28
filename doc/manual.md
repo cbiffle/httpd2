@@ -26,8 +26,10 @@ Security hygiene tips:
 
 ## Running `httpd2` for development
 
-**Linux:** After checking out the sources (and installing a Rust toolchain,
-natch), run:
+`httpd2` requires a Unix-like system, because its security model depends on Unix
+features.
+
+After checking out the sources (and installing a Rust toolchain, natch), run:
 
 ```shell
 cargo run path_to_web_pages
@@ -37,9 +39,8 @@ cargo run path_to_web_pages
 web pages you would like to serve. This will start the server on port 8000 as an
 unprivileged user without chrooting, using a self-signed key.
 
-**Non-Linux Unix-Like Systems and/or Linux distros rebelling against systemd:**
-Add `--no-default-features` to disable logging to journald. I would like to make
-this automatic but am not entirely sure how. Patches welcome!
+Note that Linux users can also enable structured logging to journald by adding
+`--features journald`.
 
 **By default, the server is compiled with minimal optimizations,** so this
 configuration isn't ideal for load testing. To fix this, add the `--release`

@@ -118,7 +118,13 @@ dependencies on Linux (not even glibc), the current incantation for building
 with MUSL on AMD64 is:
 
 ```shell
-$ PKG_CONFIG_ALLOW_CROSS=1 cargo build --release --target=x86_64-unknown-linux-musl
+$ cargo build --release --target=x86_64-unknown-linux-musl
+```
+
+Or with journald support:
+
+```shell
+$ PKG_CONFIG_ALLOW_CROSS=1 cargo build --release --features journald --target=x86_64-unknown-linux-musl
 ```
 
 ## More docs
