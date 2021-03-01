@@ -1,12 +1,3 @@
-mod args;
-mod err;
-mod log;
-mod percent;
-mod picky;
-mod serve;
-mod sync;
-mod traversal;
-
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -31,9 +22,10 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use structopt::StructOpt;
 
-use self::args::{Args, Log};
-use self::err::ServeError;
-use self::sync::SharedSemaphore;
+use httpd2::args::{Args, Log};
+use httpd2::err::ServeError;
+use httpd2::sync::SharedSemaphore;
+use httpd2::serve;
 
 #[cfg(feature = "system_allocator")]
 #[global_allocator]
