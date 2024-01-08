@@ -117,7 +117,8 @@ pub async fn files(
             picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
                 .await;
         if let Ok((error_page, enc)) = err_result {
-            let (r, s) = serve_file(&*args, error_page, enc, None, true);
+            let (mut r, s) = serve_file(&*args, error_page, enc, None, true);
+            *r.status_mut() = response.status();
             response = r;
             *srv = s;
         }
