@@ -329,6 +329,7 @@ fn map_content_type(path: &Path) -> &'static str {
         Some("xml") => "application/xml",
         Some("wasm") => "application/wasm",
         Some("bin") => "application/octet-stream",
+        Some("pdf") => "application/pdf",
         _ => "text/plain",
     }
 }
