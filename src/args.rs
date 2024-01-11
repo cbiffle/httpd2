@@ -68,6 +68,12 @@ pub struct Args {
     /// Selects a logging backend.
     #[structopt(long, default_value = "stderr", value_name = "NAME")]
     pub log: Log,
+    /// Adds User-Agent header contents, if provided, to request log output.
+    #[structopt(long)]
+    pub log_user_agent: bool,
+    /// Adds Referer header contents, if provided, to request log output.
+    #[structopt(long)]
+    pub log_referer: bool,
     /// How long our resources can be cached elsewhere, in seconds.
     #[structopt(
         long = "max-age",

@@ -24,11 +24,30 @@ pub async fn files(
     // We log all requests, whether or not they will be served.
     let method = req.method();
     let uri = req.uri();
+    let ua = if args.log_user_agent {
+        req.headers().get(hyper::header::USER_AGENT).map(|v| {
+            // Use HeaderValue's Debug impl to safely print attacker-controlled
+            // data.
+            slog::o!("user-agent" => format!("{v:?}"))
+        })
+    } else {
+        None
+    };
+    let rfr = if args.log_referer {
+        req.headers().get(hyper::header::REFERER).map(|v| {
+            // Again using HeaderValue's Debug impl.
+            slog::o!("referrer" => format!("{v:?}"))
+        })
+    } else {
+        None
+    };
     slog::info!(
         log,
         "{}", method;
         "uri" => %uri,
         "version" => ?req.version(),
+        OptionKV::from(ua),
+        OptionKV::from(rfr),
     );
 
     // Other than logging, we defer work to the latest reasonable point, to
