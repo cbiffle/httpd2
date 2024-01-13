@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use hyper::header::HeaderValue;
 use nix::unistd::{Gid, Uid};
 
 #[derive(Parser)]
