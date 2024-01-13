@@ -73,6 +73,10 @@ pub struct Args {
     /// Adds Referer header contents, if provided, to request log output.
     #[clap(long)]
     pub log_referer: bool,
+    /// Don't timestamps in the log. This may be useful if output is timestamped
+    /// by an external entity such as journald or syslog.
+    #[clap(long)]
+    pub suppress_log_timestamps: bool,
     /// How long our resources can be cached elsewhere, in seconds.
     #[clap(
         long = "max-age",

@@ -45,10 +45,12 @@ fn main() {
             // Produce boring plain text.
             let decorator = slog_term::PlainDecorator::new(std::io::stderr());
             // Pack everything onto one line, with the largest scope at left.
-            let drain = slog_term::FullFormat::new(decorator)
-                .use_original_order()
-                .build()
-                .fuse();
+            let mut fmt = slog_term::FullFormat::new(decorator)
+                .use_original_order();
+            if args.suppress_log_timestamps {
+                fmt = fmt.use_custom_timestamp(|_| Ok(()));
+            }
+            let drain = fmt.build().fuse();
             // Don't block the server until a bunch of records have built up.
             let drain =
                 slog_async::Async::new(drain).chan_size(1024).build().fuse();
