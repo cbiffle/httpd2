@@ -137,6 +137,6 @@ fn seconds(val: &str) -> Result<Duration, std::num::ParseFloatError> {
 
 fn cache_control(val: &str) -> Result<HeaderValue, std::num::ParseIntError> {
     val.parse::<u64>().map(|n| {
-        HeaderValue::from_str(&format!("cache-control: max-age={}", n)).unwrap()
+        HeaderValue::from_str(&format!("max-age={}", n)).unwrap()
     })
 }
