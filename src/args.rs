@@ -79,12 +79,11 @@ pub struct Args {
     pub suppress_log_timestamps: bool,
     /// How long our resources can be cached elsewhere, in seconds.
     #[clap(
-        long = "max-age",
+        long,
         default_value = "3600",
-        value_parser = cache_control,
         value_name = "SECS"
     )]
-    pub cache_control: HeaderValue,
+    pub default_max_age: usize,
     /// Maximum number of simultaneous connections to allow.
     #[clap(long, default_value = "100000", value_name = "COUNT")]
     pub max_connections: usize,
@@ -137,10 +136,4 @@ fn parse_gid(val: &str) -> Result<Gid, std::num::ParseIntError> {
 
 fn seconds(val: &str) -> Result<Duration, std::num::ParseFloatError> {
     val.parse::<f64>().map(Duration::from_secs_f64)
-}
-
-fn cache_control(val: &str) -> Result<HeaderValue, std::num::ParseIntError> {
-    val.parse::<u64>().map(|n| {
-        HeaderValue::from_str(&format!("max-age={}", n)).unwrap()
-    })
 }

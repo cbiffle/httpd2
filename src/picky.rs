@@ -18,6 +18,8 @@ pub struct File {
     pub content_type: &'static str,
     /// Modification timestamp.
     pub modified: SystemTime,
+    /// Cache TTL in seconds.
+    pub ttl: Option<usize>,
 }
 
 /// Accesses a path for file serving, if it meets certain narrow criteria.
@@ -39,6 +41,7 @@ pub async fn open(
     log: &slog::Logger,
     path: &Path,
     infer_content_type: impl FnOnce(&Path) -> &'static str,
+    choose_ttl: impl FnOnce(&Path) -> Option<usize>,
 ) -> Result<File, Error> {
     slog::debug!(log, "picky_open({:?})", path);
 
@@ -59,6 +62,7 @@ pub async fn open(
             len: meta.len(),
             modified: meta.modified().unwrap(),
             content_type: infer_content_type(path),
+            ttl: choose_ttl(path),
         })
     } else if meta.is_dir() {
         slog::debug!(log, "found dir");

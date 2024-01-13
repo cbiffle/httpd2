@@ -1,20 +1,23 @@
 use std::future::Future;
 use std::io;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
-use hyper::server::conn::Http;
+use bytes::Bytes;
+use hyper::body::{Incoming, Body};
+use hyper_util::rt::TokioExecutor;
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper::service::service_fn;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
 
 use nix::unistd::{Gid, Uid};
 
-use rustls::{
-    Certificate, NoClientAuth, PrivateKey, ProtocolVersion, ServerConfig,
-};
+use rustls::pki_types::{PrivatePkcs8KeyDer, CertificateDer};
+use rustls::ServerConfig;
 
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -118,6 +121,11 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
             let log = log.new(slog::o!(
                 "cid" => connection_counter.fetch_add(1, Ordering::Relaxed),
             ));
+            slog::info!(
+                log,
+                "connect";
+                "peer" => peer,
+            );
             // Clone the acceptor handle and HTTP config so they can be moved
             // into the connection future below.
             let tls_acceptor = tls_acceptor.clone();
@@ -130,7 +138,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
                 // TLS accept and connection setup process.
                 match tls_acceptor.accept(socket).await {
                     Ok(stream) => {
-                        serve_connection(args, log, http, stream, peer).await
+                        serve_connection(args, log, http, stream).await
                     }
                     Err(e) => {
                         // TLS negotiation failed. In my observations so far,
@@ -152,24 +160,21 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 async fn serve_connection(
     args: Arc<Args>,
     log: slog::Logger,
-    http: Http,
+    http: ConnBuilder<TokioExecutor>,
     stream: TlsStream<TcpStream>,
-    peer: std::net::SocketAddr,
 ) {
     // Announce the connection and record the parameters we have.
     {
-        use rustls::Session;
         let session = stream.get_ref().1;
         let alpn =
-            std::str::from_utf8(session.get_alpn_protocol().unwrap_or(b"NONE"))
+            std::str::from_utf8(session.alpn_protocol().unwrap_or(b"NONE"))
                 .unwrap_or("BOGUS");
         slog::info!(
             log,
-            "connect";
-            "peer" => peer,
+            "tls-init";
             "alpn" => alpn,
-            "tls" => ?session.get_protocol_version().unwrap(),
-            "cipher" => ?session.get_negotiated_ciphersuite().unwrap().suite,
+            "tls" => ?session.protocol_version().unwrap(),
+            "cipher" => ?session.negotiated_cipher_suite().unwrap().suite(),
         );
     }
 
@@ -177,7 +182,7 @@ async fn serve_connection(
     // request IDs within this connection.
     let request_counter = AtomicU64::new(0);
     let connection_server = http.serve_connection(
-        stream,
+        hyper_util::rt::tokio::TokioIo::new(stream),
         service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
     );
     match timeout(args.connection_time_limit, connection_server).await {
@@ -199,8 +204,8 @@ fn handle_request(
     args: Arc<Args>,
     log: &slog::Logger,
     request_counter: &AtomicU64,
-    req: Request<Body>,
-) -> impl Future<Output = Result<Response<Body>, ServeError>> {
+    req: Request<Incoming>,
+) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> {
     // Select a request ID and tag our logger with it.
     serve::files(
         args,
@@ -216,10 +221,11 @@ fn handle_request(
 fn load_key_and_cert(
     key_path: &Path,
     cert_path: &Path,
-) -> io::Result<(PrivateKey, Vec<Certificate>)> {
-    let key = rustls::internal::pemfile::pkcs8_private_keys(
+) -> io::Result<(PrivatePkcs8KeyDer<'static>, Vec<CertificateDer<'static>>)> {
+    let key = rustls_pemfile::pkcs8_private_keys(
         &mut io::BufReader::new(std::fs::File::open(key_path)?),
     )
+    .collect::<Result<Vec<_>, _>>()
     .map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,
@@ -233,9 +239,10 @@ fn load_key_and_cert(
             "no keys found in private key file",
         )
     })?;
-    let cert_chain = rustls::internal::pemfile::certs(&mut io::BufReader::new(
+    let cert_chain = rustls_pemfile::certs(&mut io::BufReader::new(
         std::fs::File::open(cert_path)?,
     ))
+    .collect::<Result<Vec<_>, _>>()
     .map_err(|_| {
         io::Error::new(io::ErrorKind::Other, "can't load certificate")
     })?;
@@ -272,26 +279,27 @@ fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
 /// Configure TLS and HTTP options for the server.
 fn configure_server_bits(
     args: &Args,
-    private_key: PrivateKey,
-    cert_chain: Vec<Certificate>,
-) -> Result<(TlsAcceptor, Http), ServeError> {
+    private_key: PrivatePkcs8KeyDer<'static>,
+    cert_chain: Vec<CertificateDer<'static>>,
+) -> Result<(TlsAcceptor, ConnBuilder<TokioExecutor>), ServeError> {
     // Configure TLS and HTTP.
     let tls_acceptor = {
-        // Don't require authentication.
-        let mut config = ServerConfig::new(NoClientAuth::new());
-        // We're using only this single identity.
-        config.set_single_cert(cert_chain, private_key)?;
-        // Prefer TLS1.3 but support 1.2.
-        config.versions =
-            vec![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+        let mut config = ServerConfig::builder()
+            // Don't require authentication.
+            .with_no_client_auth()
+            // We're using only this single identity.
+            .with_single_cert(cert_chain, private_key.into())?;
         // Prefer HTTP/2 but support 1.1.
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
     };
     // Configure Hyper.
-    let mut http = Http::new();
-    http.http2_max_concurrent_streams(Some(args.max_streams));
-    http.max_buf_size(16384); // down from 400kiB default
+    let mut http = ConnBuilder::new(TokioExecutor::new());
+    http.http2()
+        .max_concurrent_streams(Some(args.max_streams))
+        .max_frame_size(16384);
+    http.http1()
+        .max_buf_size(16384); // down from 400kiB default
 
     Ok((tls_acceptor, http))
 }

@@ -12,7 +12,7 @@ pub enum ServeError {
     /// Errors in the Nix syscall interface.
     Nix(nix::Error),
     /// Errors in the TLS subsystem.
-    Tls(rustls::TLSError),
+    Tls(rustls::Error),
 }
 
 impl std::fmt::Display for ServeError {
@@ -37,8 +37,8 @@ impl std::error::Error for ServeError {
     }
 }
 
-impl From<rustls::TLSError> for ServeError {
-    fn from(x: rustls::TLSError) -> Self {
+impl From<rustls::Error> for ServeError {
+    fn from(x: rustls::Error) -> Self {
         ServeError::Tls(x)
     }
 }

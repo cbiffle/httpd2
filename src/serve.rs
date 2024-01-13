@@ -1,11 +1,15 @@
 use std::ffi::OsStr;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::stream::StreamExt;
 
+use hyper::body::{Body, Frame};
 use hyper::header::HeaderValue;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use http_body_util::{StreamBody, BodyExt};
 
 use tokio_util::codec::{self, Decoder};
 
@@ -15,12 +19,16 @@ use crate::log::OptionKV;
 use crate::picky::{self, File};
 use crate::{percent, traversal};
 
+fn empty() -> Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>> {
+    Box::pin(http_body_util::Empty::new().map_err(|r| match r {}))
+}
+
 /// Attempts to serve a file in response to `req`.
 pub async fn files(
     args: Arc<Args>,
     log: slog::Logger,
-    req: Request<Body>,
-) -> Result<Response<Body>, ServeError> {
+    req: Request<Incoming>,
+) -> Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError> {
     // We log all requests, whether or not they will be served.
     let method = req.method();
     let uri = req.uri();
@@ -108,7 +116,7 @@ pub async fn files(
                 Err(e) => (
                     Response::builder()
                         .status(StatusCode::NOT_FOUND)
-                        .body(Body::empty())
+                        .body(empty())
                         .unwrap(),
                     ResponseInfo::Error(ErrorContext::Error(e), None),
                 ),
@@ -117,8 +125,8 @@ pub async fn files(
         // Any other request method falls here.
         _ => (
             Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
+                .status(StatusCode::NOT_IMPLEMENTED)
+                .body(empty())
                 .unwrap(),
             ResponseInfo::Error(ErrorContext::Fixed("bad method"), None),
         ),
@@ -208,9 +216,10 @@ fn start_response(
     len: u64,
     content_type: &'static str,
     modified: &str,
+    ttl: Option<usize>,
     enc: Option<Encoding>,
-) -> Response<Body> {
-    let mut response = Response::new(Body::empty());
+) -> Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>> {
+    let mut response = Response::new(empty());
 
     let headers = response.headers_mut();
 
@@ -223,7 +232,9 @@ fn start_response(
         hyper::header::VARY,
         HeaderValue::from_name(hyper::header::ACCEPT_ENCODING),
     );
-    headers.insert(hyper::header::CACHE_CONTROL, args.cache_control.clone());
+    headers.insert(hyper::header::CACHE_CONTROL,
+        HeaderValue::from_str(&format!("max-age={}", ttl.unwrap_or(args.default_max_age))).unwrap()
+    );
     headers.insert(
         hyper::header::LAST_MODIFIED,
         HeaderValue::from_str(modified).unwrap(),
@@ -268,11 +279,11 @@ async fn picky_open_with_redirect(
         path.push_str("index.html");
     }
 
-    match picky::open(log, Path::new(path), map_content_type).await {
+    match picky::open(log, Path::new(path), map_content_type, map_cache_ttl).await {
         Err(picky::Error::Directory) if !trailing_slash => {
             slog::debug!(log, "--> index.html");
             path.push_str("/index.html");
-            picky::open(log, Path::new(path), map_content_type).await
+            picky::open(log, Path::new(path), map_content_type, map_cache_ttl).await
         }
         r => r,
     }
@@ -314,7 +325,7 @@ async fn open_precompressed(
     slog::debug!(log, "checking for precompressed alternate");
     path.push_str(".gz");
     // Note that we're "inferring" the old content-type.
-    match picky::open(log, Path::new(path), |_| file.content_type).await {
+    match picky::open(log, Path::new(path), |_| file.content_type, |_| file.ttl).await {
         Ok(gzfile) if gzfile.modified >= file.modified => {
             slog::debug!(log, "serving gzip");
             // Preserve mod date of original content.
@@ -354,6 +365,19 @@ fn map_content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Optionally suggests a cache TTL for a resource based on its extension.
+///
+/// Currently hardcoded.
+fn map_cache_ttl(path: &Path) -> Option<usize> {
+    match path.extension().and_then(OsStr::to_str) {
+        Some("css") | Some("js") | Some("png") | Some("jpg") | Some("wasm") => Some(86_400),
+        Some("woff2") => Some(86_400 * 30),
+        Some("pdf") => Some(86_400),
+        Some("xml") => Some(86_400),
+        _ => None,
+    }
+}
+
 fn sanitize_path(path: &str) -> String {
     traversal::sanitize(percent::decode(path.chars())).collect()
 }
@@ -377,7 +401,7 @@ fn serve_file(
     encoding: Option<Encoding>,
     if_modified_since: Option<&str>,
     send_body: bool,
-) -> (Response<Body>, Option<Served>) {
+) -> (Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, Option<Served>) {
     // Go ahead and format the modification date as a string, since we'll need
     // it for the response headers and the if-modified-since check (where
     // relevant).
@@ -388,32 +412,35 @@ fn serve_file(
 
     // Construct the basic response.
     let mut response =
-        start_response(args, file.len, file.content_type, &*modified, encoding);
+        start_response(args, file.len, file.content_type, &*modified, file.ttl, encoding);
 
-    // Affix a body if required.
-    if send_body {
+    // If a last-modified date was provided, and it matches, we want to
+    // uniformly return a 304 without a body to both GET and HEAD requests.
+    if cached || !send_body {
         if cached {
             *response.status_mut() = StatusCode::NOT_MODIFIED;
-            (response, None)
-        } else {
-            *response.body_mut() = Body::wrap_stream(
-                codec::BytesCodec::new()
-                    .framed(file.file)
-                    .map(|b| b.map(bytes::BytesMut::freeze)),
-            );
-            (
-                response,
-                Some(Served {
-                    len: file.len,
-                    encoding: match encoding {
-                        None => "raw",
-                        Some(Encoding::Gzip) => "gzip",
-                    },
-                }),
-            )
         }
-    } else {
         (response, None)
+    } else {
+        // !cached && send_body
+        // A GET request without a matching last-modified.
+        *response.body_mut() = Box::pin(StreamBody::new(
+            codec::BytesCodec::new()
+                .framed(file.file)
+                .map(|b| b.map(bytes::BytesMut::freeze))
+                .map(|b| b.map(Frame::data))
+                .map(|r| r.map_err(ServeError::from))
+        ));
+        (
+            response,
+            Some(Served {
+                len: file.len,
+                encoding: match encoding {
+                    None => "raw",
+                    Some(Encoding::Gzip) => "gzip",
+                },
+            }),
+        )
     }
 }
 
