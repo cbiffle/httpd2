@@ -9,6 +9,11 @@ static file server &mdash; except it is HTTPS-native and supports HTTP/2. (I
 have a [detailed analysis vs.  publicfile](doc/vs.md) if you're into that sort
 of thing.)
 
+This repo also includes a derivative server, `http301d`, which only serves
+unencrypted HTTP/1 301 Moved Permanently redirects to your HTTPS server, and
+doens't read files from disk etc. It makes a nice port-80 counterpart to
+`httpd2`.
+
 ## Disclaimer
 
 I make no claims that this software is secure or impervious. I wrote this as an
