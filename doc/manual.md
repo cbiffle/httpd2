@@ -363,3 +363,72 @@ From top to bottom:
   due to `timeout`. This is because `httpd2` is running with is default
   connection timeout of 181 seconds; you can override this with the
   `--connection-time-limit` flag.
+
+## Configuring httpd2 to run under systemd
+
+Here's how I configured `httpd2` to run on my Linux server. `httpd2` doesn't
+require (or even particularly know about) systemd, so it should also work fine
+using some other approach. I just happen to like systemd.
+
+First, create a service file. In my case this went into
+`/etc/systemd/system/httpd2.service`, because it's a system-local service not
+managed by the distro (so it doesn't belong in `/usr`). My service file reads:
+
+```
+[Unit]
+Description=httpd2
+After=network.target
+
+[Service]
+EnvironmentFile=-/etc/default/httpd2
+ExecStart=/usr/local/bin/httpd2 $HTTPD2_OPTS
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notice that I've punted configuration to an environment file. This will also let
+me expand `httpd2` to allow more configuration options in the environment down
+the road. For now, though, it mostly keeps all the command line noise out of the
+service file. My environment file lives at `/etc/default/httpd2` and reads:
+
+```
+# Default settings for httpd2.
+
+# Options to pass to httpd2
+HTTPD2_OPTS=\
+  -k /etc/letsencrypt/config/live/cliffle.com/privkey.pem \
+  -r /etc/letsencrypt/config/live/cliffle.com/fullchain.pem \
+  -c -U 65534 -G 65534 \
+  \
+  -A [::]:443 \
+  \
+  --upgrade \
+  --log-user-agent \
+  --log-referer \
+  --suppress-log-timestamps \
+  --max-threads=10 \
+  \
+  /public/file/0
+```
+
+From top to bottom, we have:
+
+- The `-k` and `-r` options naming the private key and cert chain, respectively
+- The `-c`, `-U`, and `-G` options requesting a chroot and switch to the
+  `nobody` user (which on my system is numerically 65534).
+- An explicit request to bind to `[::]:443`, which forces IPv6.
+- `--upgrade` sends the `upgrade-insecure-requests` HTTP header, requesting that
+  browsers not follow unencrypted `http:` links to my site.
+- `--log-user-agent` adds the HTTP `user-agent` to the logs, which has become
+  necessary to identify some attacks recently.
+- `--log-referer` adds the HTTP `referer` to the logs, which is far less useful
+  than I'd hoped because a lot of programs don't seem to send it anymore.
+- `--suppress-log-timestamps` keeps me from getting a double-timestamp in
+  journald.
+- `--max-threads=10` limits the threadpool to 10, which is higher than my number
+  of CPUs, but since `httpd2` primarily uses threads to execute Unix blocking
+  filesystem operations, this doesn't cause CPU contention.
+- `/public/file/0` is, for historical reasons, where my web content lives.
