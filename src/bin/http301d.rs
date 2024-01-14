@@ -1,38 +1,51 @@
-use std::future::Future;
-use std::io;
-use std::path::Path;
-use std::pin::Pin;
+use std::convert::TryFrom;
+use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
 use bytes::Bytes;
-use hyper::body::{Incoming, Body};
-use hyper_util::rt::TokioExecutor;
-use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use http_body_util::Empty;
+use httpd2::log::OptionKV;
+use hyper::body::Incoming;
+use hyper::http::HeaderValue;
+use hyper::http::uri::{Scheme, Authority};
+use hyper::server::conn::http1::Builder as ConnBuilder;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
+use hyper::{Request, Response, Method, Uri, StatusCode};
 
 use nix::unistd::{Gid, Uid};
 
-use rustls::pki_types::{PrivatePkcs8KeyDer, CertificateDer};
-use rustls::ServerConfig;
-
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use clap::Parser;
 
-use httpd2::args::{Args, Log};
+use httpd2::args::{CommonArgs, Log, HasCommonArgs};
 use httpd2::err::ServeError;
 use httpd2::sync::SharedSemaphore;
-use httpd2::serve;
 
 #[cfg(feature = "system_allocator")]
 #[global_allocator]
 static GLOBAL: std::alloc::System = std::alloc::System;
+
+#[derive(Parser)]
+#[clap(name = "http301d")]
+pub struct Args {
+    #[clap(flatten)]
+    common: CommonArgs,
+
+    /// Target for redirects.
+    #[structopt(value_name = "HOST")]
+    pub default_host: String,
+}
+
+impl HasCommonArgs for Args {
+    fn common(&self) -> &CommonArgs {
+        &self.common
+    }
+}
 
 /// Main server entry point.
 fn main() {
@@ -43,14 +56,14 @@ fn main() {
     // control whether we drop privileges, among other things.
     let args = Args::parse();
 
-    let log = match args.log {
+    let log = match args.common.log {
         Log::Stderr => {
             // Produce boring plain text.
             let decorator = slog_term::PlainDecorator::new(std::io::stderr());
             // Pack everything onto one line, with the largest scope at left.
             let mut fmt = slog_term::FullFormat::new(decorator)
                 .use_original_order();
-            if args.suppress_log_timestamps {
+            if args.common.suppress_log_timestamps {
                 fmt = fmt.use_custom_timestamp(|_| Ok(()));
             }
             let drain = fmt.build().fuse();
@@ -71,8 +84,7 @@ fn main() {
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
-        .max_blocking_threads(args.max_threads)
-        .worker_threads(args.core_threads.unwrap_or_else(num_cpus::get))
+        .worker_threads(args.common.core_threads.unwrap_or_else(num_cpus::get))
         .enable_all()
         .build()
         .unwrap()
@@ -84,11 +96,11 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
     // Sanity check configuration.
     let root = Uid::from_raw(0);
     if Uid::current() == root {
-        if !args.should_chroot {
+        if !args.common.should_chroot {
             eprintln!("Running as root without chroot?!");
             std::process::exit(1);
         }
-        if args.uid.is_none() || args.uid == Some(root) {
+        if args.common.uid.is_none() || args.common.uid == Some(root) {
             eprintln!("Provide a lower privileged user ID with -U <uid>");
             std::process::exit(1);
         }
@@ -96,24 +108,21 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 
     // Things that need to get done while root:
     // - Binding to privileged ports.
-    // - Reading SSL private key.
     // - Chrooting.
 
-    let (key, cert_chain) = load_key_and_cert(&args.key_path, &args.cert_path)?;
-
-    let listener = tokio::net::TcpListener::bind(&args.addr).await?;
+    let listener = tokio::net::TcpListener::bind(&args.common.addr).await?;
 
     // Dropping privileges here...
-    drop_privs(&log, &args)?;
+    drop_privs(&log, args.common())?;
 
-    let (tls_acceptor, http) = configure_server_bits(&args, key, cert_chain)?;
+    let http = configure_server_bits(&args)?;
     let args = Arc::new(args);
 
-    slog::info!(log, "serving"; "addr" => args.addr);
+    slog::info!(log, "serving"; "addr" => args.common.addr);
 
     // Accept loop:
     let connection_counter = AtomicU64::new(0);
-    let connection_permits = SharedSemaphore::new(args.max_connections);
+    let connection_permits = SharedSemaphore::new(args.common.max_connections);
     loop {
         let permit = connection_permits.acquire().await;
         if let Ok((socket, peer)) = listener.accept().await {
@@ -128,25 +137,14 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
             );
             // Clone the acceptor handle and HTTP config so they can be moved
             // into the connection future below.
-            let tls_acceptor = tls_acceptor.clone();
             let http = http.clone();
             let args = args.clone();
             // Spawn the connection future.
             tokio::spawn(async move {
                 let _permit = permit;
                 // Now that we're in the connection-specific task, do the actual
-                // TLS accept and connection setup process.
-                match tls_acceptor.accept(socket).await {
-                    Ok(stream) => {
-                        serve_connection(args, log, http, stream).await
-                    }
-                    Err(e) => {
-                        // TLS negotiation failed. In my observations so far,
-                        // this mostly happens when a client speaks HTTP (or
-                        // nonsense) to an HTTPS port.
-                        slog::warn!(log, "error in TLS handshake: {}", e);
-                    }
-                }
+                // connection setup process.
+                serve_connection(args, log, http, socket).await
             });
         } else {
             // Taking the next incoming connection from the socket failed. In
@@ -160,24 +158,9 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 async fn serve_connection(
     args: Arc<Args>,
     log: slog::Logger,
-    http: ConnBuilder<TokioExecutor>,
-    stream: TlsStream<TcpStream>,
+    http: ConnBuilder,
+    stream: TcpStream,
 ) {
-    // Announce the connection and record the parameters we have.
-    {
-        let session = stream.get_ref().1;
-        let alpn =
-            std::str::from_utf8(session.alpn_protocol().unwrap_or(b"NONE"))
-                .unwrap_or("BOGUS");
-        slog::info!(
-            log,
-            "tls-init";
-            "alpn" => alpn,
-            "tls" => ?session.protocol_version().unwrap(),
-            "cipher" => ?session.negotiated_cipher_suite().unwrap().suite(),
-        );
-    }
-
     // Begin handling requests. The request_counter tracks
     // request IDs within this connection.
     let request_counter = AtomicU64::new(0);
@@ -185,7 +168,7 @@ async fn serve_connection(
         hyper_util::rt::tokio::TokioIo::new(stream),
         service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
     );
-    match timeout(args.connection_time_limit, connection_server).await {
+    match timeout(args.common.connection_time_limit, connection_server).await {
         Err(_) => {
             slog::info!(log, "closed"; "cause" => "timeout");
         }
@@ -199,59 +182,66 @@ async fn serve_connection(
     }
 }
 
-/// Request handler. This mostly defers to the `serve` module right now.
-fn handle_request(
+async fn handle_request(
     args: Arc<Args>,
     log: &slog::Logger,
     request_counter: &AtomicU64,
     req: Request<Incoming>,
-) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> {
-    // Select a request ID and tag our logger with it.
-    serve::files(
-        args,
-        log.new(slog::o!(
-            "rid" => request_counter
-            .fetch_add(1, Ordering::Relaxed),
-        )),
-        req,
-    )
-}
+) -> Result<Response<Empty<Bytes>>, ServeError> {
+    let log = log.new(slog::o!(
+        "rid" => request_counter.fetch_add(1, Ordering::Relaxed),
+    ));
+    // We log all requests, whether or not they will be served.
+    let method = req.method();
+    let uri = req.uri();
+    let ua = req.headers().get(hyper::header::USER_AGENT).map(|v| {
+        slog::o!("user-agent" => format!("{v:?}"))
+    });
+    let rfr = if args.common().log_referer {
+        req.headers().get(hyper::header::REFERER).map(|v| {
+            // Again using HeaderValue's Debug impl.
+            slog::o!("referrer" => format!("{v:?}"))
+        })
+    } else {
+        None
+    };
+    slog::info!(
+        log,
+        "{}", method;
+        "uri" => %uri,
+        "version" => ?req.version(),
+        OptionKV::from(ua),
+        OptionKV::from(rfr),
+    );
+    match method {
+        &Method::GET | &Method::HEAD => {
+            let mut https_uri_parts = uri.clone().into_parts();
+            https_uri_parts.scheme = Some(Scheme::HTTPS);
+            if https_uri_parts.authority.is_none() {
+                https_uri_parts.authority = Some(Authority::from_str(&args.default_host).unwrap());
+            }
+            let https_uri = Uri::try_from(https_uri_parts).unwrap();
+            let mut response = Response::new(Empty::new());
+            *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
+            response.headers_mut().insert(
+                hyper::header::LOCATION,
+                HeaderValue::from_str(&https_uri.to_string()).unwrap(),
+            );
 
-/// Loads TLS credentials from the filesystem using synchronous operations.
-fn load_key_and_cert(
-    key_path: &Path,
-    cert_path: &Path,
-) -> io::Result<(PrivatePkcs8KeyDer<'static>, Vec<CertificateDer<'static>>)> {
-    let key = rustls_pemfile::pkcs8_private_keys(
-        &mut io::BufReader::new(std::fs::File::open(key_path)?),
-    )
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "can't load private key (bad file?)",
-        )
-    })?
-    .pop()
-    .ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "no keys found in private key file",
-        )
-    })?;
-    let cert_chain = rustls_pemfile::certs(&mut io::BufReader::new(
-        std::fs::File::open(cert_path)?,
-    ))
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "can't load certificate")
-    })?;
-    Ok((key, cert_chain))
+            Ok(response)
+        }
+        _ => {
+            Ok(Response::builder()
+                .status(StatusCode::NOT_IMPLEMENTED)
+                .body(Empty::new())
+                .unwrap())
+        }
+    }
 }
 
 /// Drops the set of privileges requested in `args`. At minimum, this changes
 /// the CWD; at most, it chroots and changes to an unprivileged user.
-fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
+fn drop_privs(log: &slog::Logger, args: &CommonArgs) -> Result<(), ServeError> {
     std::env::set_current_dir(&args.root)?;
 
     if args.should_chroot {
@@ -276,30 +266,12 @@ fn drop_privs(log: &slog::Logger, args: &Args) -> Result<(), ServeError> {
     Ok(())
 }
 
-/// Configure TLS and HTTP options for the server.
+/// Configure HTTP options for the server.
 fn configure_server_bits(
-    args: &Args,
-    private_key: PrivatePkcs8KeyDer<'static>,
-    cert_chain: Vec<CertificateDer<'static>>,
-) -> Result<(TlsAcceptor, ConnBuilder<TokioExecutor>), ServeError> {
-    // Configure TLS and HTTP.
-    let tls_acceptor = {
-        let mut config = ServerConfig::builder()
-            // Don't require authentication.
-            .with_no_client_auth()
-            // We're using only this single identity.
-            .with_single_cert(cert_chain, private_key.into())?;
-        // Prefer HTTP/2 but support 1.1.
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        TlsAcceptor::from(Arc::new(config))
-    };
-    // Configure Hyper.
-    let mut http = ConnBuilder::new(TokioExecutor::new());
-    http.http2()
-        .max_concurrent_streams(Some(args.max_streams))
-        .max_frame_size(16384);
-    http.http1()
-        .max_buf_size(16384); // down from 400kiB default
-
-    Ok((tls_acceptor, http))
+    _args: &Args,
+) -> Result<ConnBuilder, ServeError> {
+    // Configure HTTP.
+    let mut http = ConnBuilder::new();
+    http.max_buf_size(16384);
+    Ok(http)
 }

@@ -1,19 +1,23 @@
+use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::stream::StreamExt;
 
+use hyper::Uri;
 use hyper::body::{Body, Frame};
 use hyper::header::HeaderValue;
+use hyper::http::uri::{Scheme, Authority};
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
-use http_body_util::{StreamBody, BodyExt};
+use http_body_util::{StreamBody, BodyExt, Empty};
 
 use tokio_util::codec::{self, Decoder};
 
-use crate::args::Args;
+use crate::args::{HasCommonArgs, CommonArgs};
 use crate::err::ServeError;
 use crate::log::OptionKV;
 use crate::picky::{self, File};
@@ -25,14 +29,14 @@ fn empty() -> Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>> {
 
 /// Attempts to serve a file in response to `req`.
 pub async fn files(
-    args: Arc<Args>,
+    args: Arc<impl HasCommonArgs>,
     log: slog::Logger,
     req: Request<Incoming>,
 ) -> Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError> {
     // We log all requests, whether or not they will be served.
     let method = req.method();
     let uri = req.uri();
-    let ua = if args.log_user_agent {
+    let ua = if args.common().log_user_agent {
         req.headers().get(hyper::header::USER_AGENT).map(|v| {
             // Use HeaderValue's Debug impl to safely print attacker-controlled
             // data.
@@ -41,7 +45,7 @@ pub async fn files(
     } else {
         None
     };
-    let rfr = if args.log_referer {
+    let rfr = if args.common().log_referer {
         req.headers().get(hyper::header::REFERER).map(|v| {
             // Again using HeaderValue's Debug impl.
             slog::o!("referrer" => format!("{v:?}"))
@@ -105,7 +109,7 @@ pub async fn files(
                         .and_then(|value| value.to_str().ok());
 
                     let (resp, srv) = serve_file(
-                        &*args,
+                        args.common(),
                         file,
                         enc,
                         if_modified_since,
@@ -144,7 +148,7 @@ pub async fn files(
             picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
                 .await;
         if let Ok((error_page, enc)) = err_result {
-            let (mut r, s) = serve_file(&*args, error_page, enc, None, true);
+            let (mut r, s) = serve_file(args.common(), error_page, enc, None, true);
             *r.status_mut() = response.status();
             response = r;
             *srv = s;
@@ -188,6 +192,60 @@ pub async fn files(
     Ok(response)
 }
 
+pub async fn redirects(
+    args: Arc<impl HasCommonArgs>,
+    default_host: &str,
+    log: slog::Logger,
+    req: Request<Incoming>,
+) -> Result<Response<Empty<Bytes>>, ServeError> {
+    // We log all requests, whether or not they will be served.
+    let method = req.method();
+    let uri = req.uri();
+    let ua = req.headers().get(hyper::header::USER_AGENT).map(|v| {
+        slog::o!("user-agent" => format!("{v:?}"))
+    });
+    let rfr = if args.common().log_referer {
+        req.headers().get(hyper::header::REFERER).map(|v| {
+            // Again using HeaderValue's Debug impl.
+            slog::o!("referrer" => format!("{v:?}"))
+        })
+    } else {
+        None
+    };
+    slog::info!(
+        log,
+        "{}", method;
+        "uri" => %uri,
+        "version" => ?req.version(),
+        OptionKV::from(ua),
+        OptionKV::from(rfr),
+    );
+    match method {
+        &Method::GET | &Method::HEAD => {
+            let mut https_uri_parts = uri.clone().into_parts();
+            https_uri_parts.scheme = Some(Scheme::HTTPS);
+            if https_uri_parts.authority.is_none() {
+                https_uri_parts.authority = Some(Authority::from_str(default_host).unwrap());
+            }
+            let https_uri = Uri::try_from(https_uri_parts).unwrap();
+            let mut response = Response::new(Empty::new());
+            *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
+            response.headers_mut().insert(
+                hyper::header::LOCATION,
+                HeaderValue::from_str(&https_uri.to_string()).unwrap(),
+            );
+
+            Ok(response)
+        }
+        _ => {
+            Ok(Response::builder()
+                .status(StatusCode::NOT_IMPLEMENTED)
+                .body(Empty::new())
+                .unwrap())
+        }
+    }
+}
+
 enum ErrorContext {
     Fixed(&'static str),
     Error(picky::Error),
@@ -212,7 +270,7 @@ struct Served {
 /// `enc` gives the content-encoding of the file, if it is not being served
 /// plain.
 fn start_response(
-    args: &Args,
+    args: &CommonArgs,
     len: u64,
     content_type: &'static str,
     modified: &str,
@@ -396,7 +454,7 @@ impl From<Encoding> for HeaderValue {
 }
 
 fn serve_file(
-    args: &Args,
+    args: &CommonArgs,
     file: File,
     encoding: Option<Encoding>,
     if_modified_since: Option<&str>,

@@ -8,24 +8,7 @@ use clap::{Parser, ValueEnum};
 use nix::unistd::{Gid, Uid};
 
 #[derive(Parser)]
-#[clap(name = "httpd2")]
-pub struct Args {
-    /// Path to the server private key file.
-    #[clap(
-        short,
-        long,
-        default_value = "localhost.key",
-        value_name = "PATH"
-    )]
-    pub key_path: PathBuf,
-    /// Path to the server certificate file.
-    #[clap(
-        short = 'r',
-        long,
-        default_value = "localhost.crt",
-        value_name = "PATH"
-    )]
-    pub cert_path: PathBuf,
+pub struct CommonArgs {
     /// Specifies that the server should chroot into ROOT. You basically always
     /// want ths, unless you're running the server as an unprivileged user.
     #[clap(short = 'c', long = "chroot")]
@@ -55,14 +38,6 @@ pub struct Args {
         value_name = "GID"
     )]
     pub gid: Option<Gid>,
-    /// Send the HTTP Strict-Transport-Security header, instructing clients not
-    /// to use unencrypted HTTP to access this site.
-    #[clap(long)]
-    pub hsts: bool,
-    /// Send the upgrade-insecure-requests directive, instructing clients to
-    /// convert http URLs to https.
-    #[clap(long)]
-    pub upgrade: bool,
     /// Selects a logging backend.
     #[clap(long, default_value = "stderr", value_name = "NAME")]
     pub log: Log,
@@ -72,8 +47,8 @@ pub struct Args {
     /// Adds Referer header contents, if provided, to request log output.
     #[clap(long)]
     pub log_referer: bool,
-    /// Don't timestamps in the log. This may be useful if output is timestamped
-    /// by an external entity such as journald or syslog.
+    /// Don't include timestamps in the log. This may be useful if output is
+    /// timestamped by an external entity such as journald or syslog.
     #[clap(long)]
     pub suppress_log_timestamps: bool,
     /// How long our resources can be cached elsewhere, in seconds.
@@ -83,6 +58,14 @@ pub struct Args {
         value_name = "SECS"
     )]
     pub default_max_age: usize,
+    /// Send the HTTP Strict-Transport-Security header, instructing clients not
+    /// to use unencrypted HTTP to access this site.
+    #[clap(long)]
+    pub hsts: bool,
+    /// Send the upgrade-insecure-requests directive, instructing clients to
+    /// convert http URLs to https.
+    #[clap(long)]
+    pub upgrade: bool,
     /// Maximum number of simultaneous connections to allow.
     #[clap(long, default_value = "100000", value_name = "COUNT")]
     pub max_connections: usize,
@@ -104,18 +87,15 @@ pub struct Args {
     /// not provided, this will equal the number of CPUs.
     #[clap(long)]
     pub core_threads: Option<usize>,
-    /// Maximum number of worker threads to start, to handle blocking filesystem
-    /// operations. Threads are started in response to load, and shut down when
-    /// not used. The actual thread count will be above this number, because not
-    /// all threads are workers. Larger numbers will improve performance for
-    /// large numbers of concurrent requests, at the expense of RAM.
-    #[clap(long, default_value = "10")]
-    pub max_threads: usize,
 
     /// Path of directory to serve (and, if --chroot is provided, the new root
     /// directory).
     #[clap(value_name = "ROOT")]
     pub root: PathBuf,
+}
+
+pub trait HasCommonArgs {
+    fn common(&self) -> &CommonArgs;
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
