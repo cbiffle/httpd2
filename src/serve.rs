@@ -370,7 +370,7 @@ fn map_content_type(path: &Path) -> &'static str {
 /// Currently hardcoded.
 fn map_cache_ttl(path: &Path) -> Option<usize> {
     match path.extension().and_then(OsStr::to_str) {
-        Some("css") | Some("js") | Some("png") | Some("jpg") | Some("wasm") => Some(86_400),
+        Some("css") | Some("js") | Some("png") | Some("jpg") | Some("wasm") | Some("gif") => Some(86_400),
         Some("woff2") => Some(86_400 * 30),
         Some("pdf") => Some(86_400),
         Some("xml") => Some(86_400),
