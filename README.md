@@ -1,11 +1,13 @@
 # A modern static file server
 
 `httpd2` (working title, as it's the second one I've written recently) is a
-program that serves web pages / resources to the public. And that's it. It is
-inspired by, and patterned after, [`publicfile`], the security-conscious static
-file server &mdash; except it is HTTPS-native and supports HTTP/2. (I have a
-[detailed analysis vs.  publicfile](doc/vs.md) if you're into that sort of
-thing.)
+program that serves web pages / resources to the public. And that's it. For more
+details see [the manual](doc/manual.md).
+
+It is inspired by, and patterned after, [`publicfile`], the security-conscious
+static file server &mdash; except it is HTTPS-native and supports HTTP/2. (I
+have a [detailed analysis vs.  publicfile](doc/vs.md) if you're into that sort
+of thing.)
 
 ## Disclaimer
 
