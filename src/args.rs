@@ -113,6 +113,6 @@ fn parse_gid(val: &str) -> Result<Gid, std::num::ParseIntError> {
     val.parse::<libc::gid_t>().map(Gid::from_raw)
 }
 
-fn seconds(val: &str) -> Result<Duration, std::num::ParseFloatError> {
+pub fn seconds(val: &str) -> Result<Duration, std::num::ParseFloatError> {
     val.parse::<f64>().map(Duration::from_secs_f64)
 }

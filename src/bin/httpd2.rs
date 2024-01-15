@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 use bytes::Bytes;
 use hyper::body::{Incoming, Body};
@@ -65,6 +66,17 @@ pub struct Args {
     /// large numbers of concurrent requests, at the expense of RAM.
     #[clap(long, default_value = "10")]
     pub max_threads: usize,
+
+    /// Maximum time a client can spend setting up TLS. This process tends to be
+    /// very fast, and only happens once per connection, so we can be more
+    /// aggressive than the overall connection time limit.
+    #[clap(
+        long,
+        default_value = "10",
+        value_parser = httpd2::args::seconds,
+        value_name="SECS"
+    )]
+    pub tls_handshake_time_limit: Duration,
 }
 
 impl HasCommonArgs for Args {
@@ -175,22 +187,26 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
                 let _permit = permit;
                 // Now that we're in the connection-specific task, do the actual
                 // TLS accept and connection setup process.
-                match tls_acceptor.accept(socket).await {
-                    Ok(stream) => {
+                match timeout(args.tls_handshake_time_limit, tls_acceptor.accept(socket)).await {
+                    Ok(Ok(stream)) => {
                         serve_connection(args, log, http, stream).await
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         // TLS negotiation failed. In my observations so far,
                         // this mostly happens when a client speaks HTTP (or
                         // nonsense) to an HTTPS port.
-                        slog::warn!(log, "error in TLS handshake: {}", e);
+                        slog::info!(log, "tls-error"; "msg" => e);
+                    }
+                    Err(_) => {
+                        // TLS negotiation timed out.
+                        slog::info!(log, "tls-timeout");
                     }
                 }
             });
         } else {
             // Taking the next incoming connection from the socket failed. In
             // practice, this means that the server is out of file descriptors.
-            slog::warn!(log, "error accepting");
+            slog::warn!(log, "accept-error");
         }
     }
 }
