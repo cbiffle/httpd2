@@ -1,19 +1,15 @@
-use std::convert::TryFrom;
+use std::sync::Arc;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::pin::Pin;
-use std::str::FromStr;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::stream::StreamExt;
 
-use hyper::Uri;
 use hyper::body::{Body, Frame};
 use hyper::header::HeaderValue;
-use hyper::http::uri::{Scheme, Authority};
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
-use http_body_util::{StreamBody, BodyExt, Empty};
+use http_body_util::{StreamBody, BodyExt};
 
 use tokio_util::codec::{self, Decoder};
 
@@ -190,60 +186,6 @@ pub async fn files(
     }
 
     Ok(response)
-}
-
-pub async fn redirects(
-    args: Arc<impl HasCommonArgs>,
-    default_host: &str,
-    log: slog::Logger,
-    req: Request<Incoming>,
-) -> Result<Response<Empty<Bytes>>, ServeError> {
-    // We log all requests, whether or not they will be served.
-    let method = req.method();
-    let uri = req.uri();
-    let ua = req.headers().get(hyper::header::USER_AGENT).map(|v| {
-        slog::o!("user-agent" => format!("{v:?}"))
-    });
-    let rfr = if args.common().log_referer {
-        req.headers().get(hyper::header::REFERER).map(|v| {
-            // Again using HeaderValue's Debug impl.
-            slog::o!("referrer" => format!("{v:?}"))
-        })
-    } else {
-        None
-    };
-    slog::info!(
-        log,
-        "{}", method;
-        "uri" => %uri,
-        "version" => ?req.version(),
-        OptionKV::from(ua),
-        OptionKV::from(rfr),
-    );
-    match method {
-        &Method::GET | &Method::HEAD => {
-            let mut https_uri_parts = uri.clone().into_parts();
-            https_uri_parts.scheme = Some(Scheme::HTTPS);
-            if https_uri_parts.authority.is_none() {
-                https_uri_parts.authority = Some(Authority::from_str(default_host).unwrap());
-            }
-            let https_uri = Uri::try_from(https_uri_parts).unwrap();
-            let mut response = Response::new(Empty::new());
-            *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
-            response.headers_mut().insert(
-                hyper::header::LOCATION,
-                HeaderValue::from_str(&https_uri.to_string()).unwrap(),
-            );
-
-            Ok(response)
-        }
-        _ => {
-            Ok(Response::builder()
-                .status(StatusCode::NOT_IMPLEMENTED)
-                .body(Empty::new())
-                .unwrap())
-        }
-    }
 }
 
 enum ErrorContext {
