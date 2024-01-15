@@ -357,6 +357,7 @@ fn map_content_type(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("png") => "image/png",
         Some("jpg") => "image/jpeg",
+        Some("gif") => "image/gif",
         Some("xml") => "application/xml",
         Some("wasm") => "application/wasm",
         Some("bin") => "application/octet-stream",
