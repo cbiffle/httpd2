@@ -298,6 +298,16 @@ fn drop_privs(log: &slog::Logger, args: &CommonArgs) -> Result<(), ServeError> {
     }
     if let Some(gid) = args.gid {
         nix::unistd::setgid(gid)?;
+
+        #[cfg(target_os = "macos")]
+        unsafe {
+            if libc::setgroups(1, &gid.as_raw()) != 0 {
+                eprintln!("Error with libc::setgroups");
+                std::process::exit(1);
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
         nix::unistd::setgroups(&[gid])?;
     }
     if let Some(uid) = args.uid {
