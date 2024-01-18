@@ -540,6 +540,7 @@ dependencies = [
  "slog-async",
  "slog-journald",
  "slog-term",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",
