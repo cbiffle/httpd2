@@ -34,6 +34,7 @@ clap = { version = "4.4.15", features = ["derive", "wrap_help"] }
 http-body-util = "0.1.0"
 rustls-pemfile = "2.0.0"
 hyper-util = { version = "0.1.2", features = ["server", "server-auto", "tokio"] }
+enum-map = "2.7.3"
 
 [profile.release]
 debug = 2

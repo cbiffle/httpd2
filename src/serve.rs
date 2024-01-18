@@ -4,6 +4,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use bytes::Bytes;
+use enum_map::{Enum, EnumMap};
 use futures::stream::StreamExt;
 
 use hyper::body::{Body, Frame};
@@ -64,31 +65,37 @@ pub async fn files(
     // side-channel that opens should be the ability to probe what public files
     // exist on the filesystem ... which is exactly what the HTTP server is for.
 
-    let mut accept_gzip = false;
+    let mut accept_encodings = EnumMap::default();
     let (mut response, mut response_info) = match (method, uri.path()) {
         (&Method::GET, path) | (&Method::HEAD, path) => {
             // Sanitize the path using a derivative of publicfile's algorithm.
             // It appears that Hyper blocks non-ASCII characters.
             let mut sanitized = sanitize_path(path);
 
-            // Scan the request headers to see if gzip compressed responses are
-            // OK. We need to do this before consulting the filesystem, but it's
+            // Scan the request headers to see if compressed responses are OK.
+            // We need to do this before consulting the filesystem, but it's
             // fairly quick.
-            if req
+            req
                 .headers()
+                // The header can technically be specified more than once.
                 .get_all(hyper::header::ACCEPT_ENCODING)
                 .iter()
+                // Ignore any that aren't UTF-8.
                 .filter_map(|list| list.to_str().ok())
-                .any(|list| list.split(',').any(|item| item.trim() == "gzip"))
-            {
-                accept_gzip = true;
-            }
+                // Split them all at commas and merge them together.
+                .flat_map(|list| list.split(','))
+                // Collect the methods we recognize.
+                .for_each(|name| match name.trim() {
+                    "gzip" => accept_encodings[Encoding::Gzip] = true,
+                    "br" => accept_encodings[Encoding::Brotli] = true,
+                    _ => (),
+                });
 
             // Now, see what the path yields.
-            let open_result = picky_open_with_redirect_and_gzip(
+            let open_result = picky_open_with_redirect_and_alt(
                 &log,
                 &mut sanitized,
-                accept_gzip,
+                accept_encodings,
             )
             .await;
 
@@ -139,9 +146,9 @@ pub async fn files(
         let mut redirect =
             format!("./errors/{:03}.html", response.status().as_u16());
         // TODO: it would be nice to break the picky combinators out, so I could
-        // have picky_open_with_gzip (no redirect) here.
+        // have picky_open_with_alt (no redirect) here.
         let err_result =
-            picky_open_with_redirect_and_gzip(&log, &mut redirect, accept_gzip)
+            picky_open_with_redirect_and_alt(&log, &mut redirect, accept_encodings)
                 .await;
         if let Ok((error_page, enc)) = err_result {
             let (mut r, s) = serve_file(args.common(), error_page, enc, None, true);
@@ -303,47 +310,64 @@ async fn picky_open_with_redirect(
 ///
 /// Returns the normal `File` result, plus an optional `Content-Encoding` value
 /// if an alternate encoding was selected.
-async fn picky_open_with_redirect_and_gzip(
+async fn picky_open_with_redirect_and_alt(
     log: &slog::Logger,
     path: &mut String,
-    accept_gzip: bool,
+    encodings: EnumMap<Encoding, bool>,
 ) -> Result<(File, Option<Encoding>), picky::Error> {
     let file = picky_open_with_redirect(log, path).await?;
 
-    if !accept_gzip {
+    // If the caller isn't willing to accept any compressed encodings, we're
+    // done.
+    if encodings.values().all(|&accept| accept == false) {
         return Ok((file, None));
     }
 
-    open_precompressed(log, path, file).await
+    open_precompressed(log, path, file, encodings).await
 }
 
 async fn open_precompressed(
     log: &slog::Logger,
     path: &mut String,
     file: File,
+    encodings: EnumMap<Encoding, bool>,
 ) -> Result<(File, Option<Encoding>), picky::Error> {
     slog::debug!(log, "checking for precompressed alternate");
-    path.push_str(".gz");
-    // Note that we're "inferring" the old content-type.
-    match picky::open(log, Path::new(path), |_| file.content_type, |_| file.ttl).await {
-        Ok(gzfile) if gzfile.modified >= file.modified => {
-            slog::debug!(log, "serving gzip");
-            // Preserve mod date of original content.
-            Ok((
-                File {
-                    modified: file.modified,
-                    ..gzfile
-                },
-                Some(Encoding::Gzip),
-            ))
+    let path_orig_len = path.len();
+    for (encoding, accepted) in encodings {
+        if !accepted { continue; }
+
+        path.push_str(encoding.file_extension());
+
+        // Note that we're "inferring" the old content-type and TTL.
+        match picky::open(log, Path::new(path), |_| file.content_type, |_| file.ttl).await {
+            Ok(altfile) if altfile.modified >= file.modified => {
+                slog::debug!(log, "serving {}", encoding.short_name());
+                // Preserve mod date of original content.
+                return Ok((
+                        File {
+                            modified: file.modified,
+                            ..altfile
+                        },
+                        Some(encoding),
+                ));
+            }
+            Ok(_) => {
+                // We distinguish this case only to improve debug output; if
+                // debug output is disabled, as is typical in production, it
+                // collapses with the one below.
+                slog::debug!(log, "alternate found for encoding {encoding:?} but is modified later than primary");
+            }
+            _ => {
+                // If the compressed alternative isn't available, or if it
+                // predates the actual content, ignore it.
+                slog::debug!(log, "no alternate found for encoding {encoding:?}");
+            }
         }
-        _ => {
-            // If the compressed alternative isn't available, or if it
-            // predates the actual content, ignore it.
-            slog::debug!(log, "serving uncompressed");
-            Ok((file, None))
-        }
+        path.truncate(path_orig_len);
     }
+
+    Ok((file, None))
 }
 
 /// Guesses the `Content-Type` of a file based on its path.
@@ -383,16 +407,35 @@ fn sanitize_path(path: &str) -> String {
     traversal::sanitize(percent::decode(path.chars())).collect()
 }
 
-#[derive(Copy, Clone, Debug)]
+/// Content-Encodings we support. The order of variants in this enum determines
+/// the order in which they're prioritized, from highest priority to lowest.
+#[derive(Copy, Clone, Debug, Enum)]
 enum Encoding {
+    Brotli,
     Gzip,
+}
+
+impl Encoding {
+    fn file_extension(&self) -> &'static str {
+        match self {
+            Self::Brotli => ".br",
+            Self::Gzip => ".gz",
+        }
+    }
+
+    /// Short names for the encodings as used in the Accept-Encodings headers.
+    /// These are also logged.
+    fn short_name(&self) -> &'static str {
+        match self {
+            Self::Brotli => "br",
+            Self::Gzip => "gzip",
+        }
+    }
 }
 
 impl From<Encoding> for HeaderValue {
     fn from(e: Encoding) -> Self {
-        match e {
-            Encoding::Gzip => HeaderValue::from_static("gzip"),
-        }
+        HeaderValue::from_static(e.short_name())
     }
 }
 
@@ -438,7 +481,7 @@ fn serve_file(
                 len: file.len,
                 encoding: match encoding {
                     None => "raw",
-                    Some(Encoding::Gzip) => "gzip",
+                    Some(e) => e.short_name(),
                 },
             }),
         )
