@@ -18,5 +18,11 @@ pub enum ServeError {
     /// Errors in the TLS subsystem.
     #[error(transparent)]
     Tls(#[from] rustls::Error),
+    /// Errors generated defensively to force a connection to close.
+    #[error(transparent)]
+    Defense(#[from] DefenseError),
 }
 
+#[derive(Debug, Error)]
+#[error("defense mechanism triggered")]
+pub struct DefenseError;

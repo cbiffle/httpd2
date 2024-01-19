@@ -15,7 +15,7 @@ use http_body_util::{StreamBody, BodyExt};
 use tokio_util::codec::{self, Decoder};
 
 use crate::args::{HasCommonArgs, CommonArgs};
-use crate::err::ServeError;
+use crate::err::{ServeError, DefenseError};
 use crate::log::OptionKV;
 use crate::picky::{self, File};
 use crate::{percent, traversal};
@@ -59,6 +59,18 @@ pub async fn files(
         OptionKV::from(rfr),
     );
 
+    // Request-level defenses:
+
+    // Check the request for a body. Deny if found.
+    if req.size_hint().lower() != 0 || req.size_hint().upper() != Some(0) {
+        slog::warn!(
+            log,
+            "defense";
+            "cause" => "upload",
+        );
+        return Err(DefenseError.into());
+    }
+
     // Other than logging, we defer work to the latest reasonable point, to
     // reduce the load of bogus requests on the server. This means that bogus
     // requests will incur lower latency than legit ones, but the only
@@ -101,14 +113,21 @@ pub async fn files(
 
             match open_result {
                 Ok((file, enc)) => {
-                    // Collect the caller's cache date, if present. Because the
-                    // date format is fixed as of HTTP/1.1, and because caches
-                    // send the *exact* previous date in if-modified-since, we
-                    // can get away with doing an exact bytewise date comparison
-                    // rather than parsing.
+                    // Collect the caller's cache date and etag, if present.
+                    //
+                    // Because the date format is fixed as of HTTP/1.1, and
+                    // because caches send the *exact* previous date in
+                    // if-modified-since, we can get away with doing an exact
+                    // bytewise date comparison rather than parsing.
+                    //
+                    // ETag is already defined as an exact comparison.
                     let if_modified_since = req
                         .headers()
                         .get(hyper::header::IF_MODIFIED_SINCE)
+                        .and_then(|value| value.to_str().ok());
+                    let if_none_match = req
+                        .headers()
+                        .get(hyper::header::IF_NONE_MATCH)
                         .and_then(|value| value.to_str().ok());
 
                     let (resp, srv) = serve_file(
@@ -116,6 +135,7 @@ pub async fn files(
                         file,
                         enc,
                         if_modified_since,
+                        if_none_match,
                         method == Method::GET,
                     );
                     (resp, ResponseInfo::Success(srv))
@@ -151,7 +171,7 @@ pub async fn files(
             picky_open_with_redirect_and_alt(&log, &mut redirect, accept_encodings)
                 .await;
         if let Ok((error_page, enc)) = err_result {
-            let (mut r, s) = serve_file(args.common(), error_page, enc, None, true);
+            let (mut r, s) = serve_file(args.common(), error_page, enc, None, None, true);
             *r.status_mut() = response.status();
             response = r;
             *srv = s;
@@ -223,6 +243,7 @@ fn start_response(
     len: u64,
     content_type: &'static str,
     modified: &str,
+    etag: &str,
     ttl: Option<usize>,
     enc: Option<Encoding>,
 ) -> Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>> {
@@ -245,6 +266,10 @@ fn start_response(
     headers.insert(
         hyper::header::LAST_MODIFIED,
         HeaderValue::from_str(modified).unwrap(),
+    );
+    headers.insert(
+        hyper::header::ETAG,
+        HeaderValue::from_str(etag).unwrap(),
     );
     if let Some(enc) = enc {
         headers.insert(hyper::header::CONTENT_ENCODING, enc.into());
@@ -444,19 +469,26 @@ fn serve_file(
     file: File,
     encoding: Option<Encoding>,
     if_modified_since: Option<&str>,
+    if_none_match: Option<&str>,
     send_body: bool,
 ) -> (Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, Option<Served>) {
     // Go ahead and format the modification date as a string, since we'll need
     // it for the response headers and the if-modified-since check (where
-    // relevant).
-    let modified = httpdate::fmt_http_date(file.modified);
+    // relevant). We unfortunately need to format this two different ways thanks
+    // to ETag's requirement for quotes. Since we trust the output to be ASCII,
+    // we can avoid the extra allocation by slicing the quoted representation as
+    // follows:
+    let http_date = httpdate::HttpDate::from(file.modified);
+    let etag = format!("\"{http_date}\"");
+    let modified = &etag[1..etag.len() - 1];
 
     // Check if-modified-since before handing off the modified string.
-    let cached = if_modified_since == Some(&*modified);
+    let cached = if_modified_since == Some(modified)
+        || if_none_match == Some(&*etag);
 
     // Construct the basic response.
     let mut response =
-        start_response(args, file.len, file.content_type, &*modified, file.ttl, encoding);
+        start_response(args, file.len, file.content_type, modified, &*etag, file.ttl, encoding);
 
     // If a last-modified date was provided, and it matches, we want to
     // uniformly return a 304 without a body to both GET and HEAD requests.
