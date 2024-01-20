@@ -92,11 +92,16 @@ pub async fn files(
                 // The header can technically be specified more than once.
                 .get_all(hyper::header::ACCEPT_ENCODING)
                 .iter()
-                // Ignore any that aren't UTF-8.
+                // Ignore any that aren't UTF-8. We need UTF-8 to get trim()
+                // below, and all our recognized ones are ASCII anyway.
                 .filter_map(|list| list.to_str().ok())
                 // Split them all at commas and merge them together.
                 .flat_map(|list| list.split(','))
-                // Collect the methods we recognize.
+                // Algorithms may have semicolon-delimited attributes; remove
+                // them.
+                .map(|name| name.split_once(';').map(|(before, _)| before).unwrap_or(name))
+                // Collect the methods we recognize, ignoring leading or
+                // trailing whitespace.
                 .for_each(|name| match name.trim() {
                     "gzip" => accept_encodings[Encoding::Gzip] = true,
                     "br" => accept_encodings[Encoding::Brotli] = true,
