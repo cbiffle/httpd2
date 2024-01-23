@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -120,6 +121,20 @@ fn main() {
         }
     };
 
+    let mut mime_map = httpd2::serve::default_content_type_map();
+    for (key, value) in std::env::vars() {
+        if key.starts_with("CT_") {
+
+            let ext = key[3..].to_string();
+            slog::info!(log, "extension {ext} => content-type {value}");
+            mime_map.insert(
+                ext,
+                value.leak(),
+            );
+        }
+    }
+    let mime_map = Arc::new(mime_map);
+
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .max_blocking_threads(args.max_threads)
@@ -127,11 +142,11 @@ fn main() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(start(args, log).map(Result::unwrap))
+        .block_on(start(args, log, mime_map).map(Result::unwrap))
 }
 
 /// Starts up a server.
-async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
+async fn start(args: Args, log: slog::Logger, mime_map: Arc<BTreeMap<String, &'static str>>) -> Result<(), ServeError> {
     // Sanity check configuration.
     let root = Uid::from_raw(0);
     if Uid::current() == root {
@@ -181,7 +196,8 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
             // into the connection future below.
             let tls_acceptor = tls_acceptor.clone();
             let http = http.clone();
-            let args = args.clone();
+            let args = Arc::clone(&args);
+            let mime_map = Arc::clone(&mime_map);
             // Spawn the connection future.
             tokio::spawn(async move {
                 let _permit = permit;
@@ -189,7 +205,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
                 // TLS accept and connection setup process.
                 match timeout(args.tls_handshake_time_limit, tls_acceptor.accept(socket)).await {
                     Ok(Ok(stream)) => {
-                        serve_connection(args, log, http, stream).await
+                        serve_connection(args, log, mime_map, http, stream).await
                     }
                     Ok(Err(e)) => {
                         // TLS negotiation failed. In my observations so far,
@@ -215,6 +231,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
 async fn serve_connection(
     args: Arc<Args>,
     log: slog::Logger,
+    mime_map: Arc<BTreeMap<String, &'static str>>,
     http: ConnBuilder<TokioExecutor>,
     stream: TlsStream<TcpStream>,
 ) {
@@ -238,7 +255,10 @@ async fn serve_connection(
     let request_counter = AtomicU64::new(0);
     let connection_server = http.serve_connection(
         hyper_util::rt::tokio::TokioIo::new(stream),
-        service_fn(|x| handle_request(args.clone(), &log, &request_counter, x)),
+        service_fn(|x| {
+            let mime_map = Arc::clone(&mime_map);
+            handle_request(args.clone(), &log, mime_map, &request_counter, x)
+        }),
     );
     match timeout(args.common.connection_time_limit, connection_server).await {
         Err(_) => {
@@ -258,6 +278,7 @@ async fn serve_connection(
 fn handle_request(
     args: Arc<Args>,
     log: &slog::Logger,
+    mime_map: Arc<BTreeMap<String, &'static str>>,
     request_counter: &AtomicU64,
     req: Request<Incoming>,
 ) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> {
@@ -268,6 +289,7 @@ fn handle_request(
             "rid" => request_counter
             .fetch_add(1, Ordering::Relaxed),
         )),
+        mime_map,
         req,
     )
 }

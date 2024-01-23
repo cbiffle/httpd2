@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -28,6 +29,7 @@ fn empty() -> Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>> {
 pub async fn files(
     args: Arc<impl HasCommonArgs>,
     log: slog::Logger,
+    mime_map: Arc<BTreeMap<String, &'static str>>,
     req: Request<Incoming>,
 ) -> Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError> {
     // We log all requests, whether or not they will be served.
@@ -111,6 +113,7 @@ pub async fn files(
             // Now, see what the path yields.
             let open_result = picky_open_with_redirect_and_alt(
                 &log,
+                &*mime_map,
                 &mut sanitized,
                 accept_encodings,
             )
@@ -173,7 +176,7 @@ pub async fn files(
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_alt (no redirect) here.
         let err_result =
-            picky_open_with_redirect_and_alt(&log, &mut redirect, accept_encodings)
+            picky_open_with_redirect_and_alt(&log, &*mime_map, &mut redirect, accept_encodings)
                 .await;
         if let Ok((error_page, enc)) = err_result {
             let (mut r, s) = serve_file(args.common(), error_page, enc, None, None, true);
@@ -304,6 +307,7 @@ fn start_response(
 /// open operation succeeds, returning its contents.
 async fn picky_open_with_redirect(
     log: &slog::Logger,
+    mime_map: &BTreeMap<String, &'static str>,
     path: &mut String,
 ) -> Result<File, picky::Error> {
     // Performance optimization: if the path is *syntactically* a directory,
@@ -316,11 +320,11 @@ async fn picky_open_with_redirect(
         path.push_str("index.html");
     }
 
-    match picky::open(log, Path::new(path), map_content_type, map_cache_ttl).await {
+    match picky::open(log, Path::new(path), |p| find_content_type(mime_map, p), map_cache_ttl).await {
         Err(picky::Error::Directory) if !trailing_slash => {
             slog::debug!(log, "--> index.html");
             path.push_str("/index.html");
-            picky::open(log, Path::new(path), map_content_type, map_cache_ttl).await
+            picky::open(log, Path::new(path), |p| find_content_type(mime_map, p), map_cache_ttl).await
         }
         r => r,
     }
@@ -342,10 +346,11 @@ async fn picky_open_with_redirect(
 /// if an alternate encoding was selected.
 async fn picky_open_with_redirect_and_alt(
     log: &slog::Logger,
+    mime_map: &BTreeMap<String, &'static str>,
     path: &mut String,
     encodings: EnumMap<Encoding, bool>,
 ) -> Result<(File, Option<Encoding>), picky::Error> {
-    let file = picky_open_with_redirect(log, path).await?;
+    let file = picky_open_with_redirect(log, mime_map, path).await?;
 
     // If the caller isn't willing to accept any compressed encodings, we're
     // done.
@@ -400,24 +405,31 @@ async fn open_precompressed(
     Ok((file, None))
 }
 
+/// Produces the default file extension to MIME type mapping.
+pub fn default_content_type_map() -> BTreeMap<String, &'static str> {
+    [
+        ("html", "text/html"),
+        ("css", "text/css"),
+        ("js", "text/javascript"),
+        ("woff2", "font/woff2"),
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("gif", "image/gif"),
+        ("xml", "application/xml"),
+        ("wasm", "application/wasm"),
+        ("bin", "application/octet-stream"),
+        ("pdf", "application/pdf"),
+    ].into_iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
 /// Guesses the `Content-Type` of a file based on its path.
 ///
 /// Currently, this is hardcoded based on file extensions, like we're Windows.
-fn map_content_type(path: &Path) -> &'static str {
-    match path.extension().and_then(OsStr::to_str) {
-        Some("html") => "text/html",
-        Some("css") => "text/css",
-        Some("js") => "text/javascript",
-        Some("woff2") => "font/woff2",
-        Some("png") => "image/png",
-        Some("jpg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("xml") => "application/xml",
-        Some("wasm") => "application/wasm",
-        Some("bin") => "application/octet-stream",
-        Some("pdf") => "application/pdf",
-        _ => "text/plain",
-    }
+fn find_content_type(map: &BTreeMap<String, &'static str>, path: &Path) -> &'static str {
+    path.extension().and_then(OsStr::to_str)
+        .and_then(|ext| map.get(ext))
+        .map(|r| *r)
+        .unwrap_or("text/plain")
 }
 
 /// Optionally suggests a cache TTL for a resource based on its extension.
