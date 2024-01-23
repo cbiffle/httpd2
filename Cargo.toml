@@ -2,7 +2,7 @@
 name = "httpd2"
 version = "0.1.0"
 authors = ["Cliff L. Biffle <code@cliffle.com>"]
-edition = "2018"
+edition = "2021"
 default-run = "httpd2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

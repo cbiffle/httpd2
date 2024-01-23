@@ -419,7 +419,7 @@ pub fn default_content_type_map() -> BTreeMap<String, &'static str> {
         ("wasm", "application/wasm"),
         ("bin", "application/octet-stream"),
         ("pdf", "application/pdf"),
-    ].into_iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    ].into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 /// Guesses the `Content-Type` of a file based on its path.
