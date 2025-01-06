@@ -27,7 +27,7 @@ bytes = "1.5.0"
 httpdate = "1.0.3"
 slog = "2.7.0"
 slog-async = "2.7.0"
-slog-term = "2.8.0"
+slog-term = "2.9.1"
 slog-journald = { version = "2.1.1", optional = true }
 num_cpus = "1.13.0"
 clap = { version = "4.4.15", features = ["derive", "wrap_help"] }
