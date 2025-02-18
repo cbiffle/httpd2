@@ -18,7 +18,7 @@ use hyper::{Request, Response};
 
 use nix::unistd::{Gid, Uid};
 
-use rustls::pki_types::{PrivatePkcs8KeyDer, CertificateDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 
 use tokio::net::TcpStream;
@@ -298,24 +298,29 @@ fn handle_request(
 fn load_key_and_cert(
     key_path: &Path,
     cert_path: &Path,
-) -> io::Result<(PrivatePkcs8KeyDer<'static>, Vec<CertificateDer<'static>>)> {
-    let key = rustls_pemfile::pkcs8_private_keys(
+) -> io::Result<(PrivateKeyDer<'static>, Vec<CertificateDer<'static>>)> {
+    let key = rustls_pemfile::read_one(
         &mut io::BufReader::new(std::fs::File::open(key_path)?),
-    )
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| {
+    ).map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,
             "can't load private key (bad file?)",
         )
-    })?
-    .pop()
-    .ok_or_else(|| {
+    })?;
+    let key = key.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::Other,
             "no keys found in private key file",
         )
     })?;
+    let key = match key {
+        rustls_pemfile::Item::Pkcs8Key(der) => der.into(),
+        rustls_pemfile::Item::Sec1Key(der) => der.into(),
+        _ => return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "unsupported private key type",
+        )),
+    };
     let cert_chain = rustls_pemfile::certs(&mut io::BufReader::new(
         std::fs::File::open(cert_path)?,
     ))
@@ -356,7 +361,7 @@ fn drop_privs(log: &slog::Logger, args: &CommonArgs) -> Result<(), ServeError> {
 /// Configure TLS and HTTP options for the server.
 fn configure_server_bits(
     args: &Args,
-    private_key: PrivatePkcs8KeyDer<'static>,
+    private_key: PrivateKeyDer<'static>,
     cert_chain: Vec<CertificateDer<'static>>,
 ) -> Result<(TlsAcceptor, ConnBuilder<TokioExecutor>), ServeError> {
     // Configure TLS and HTTP.
@@ -365,7 +370,7 @@ fn configure_server_bits(
             // Don't require authentication.
             .with_no_client_auth()
             // We're using only this single identity.
-            .with_single_cert(cert_chain, private_key.into())?;
+            .with_single_cert(cert_chain, private_key)?;
         // Prefer HTTP/2 but support 1.1.
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
