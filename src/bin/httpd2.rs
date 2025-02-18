@@ -123,12 +123,10 @@ fn main() {
 
     let mut mime_map = httpd2::serve::default_content_type_map();
     for (key, value) in std::env::vars() {
-        if key.starts_with("CT_") {
-
-            let ext = key[3..].to_string();
+        if let Some(ext) = key.strip_prefix("CT_") {
             slog::info!(log, "extension {ext} => content-type {value}");
             mime_map.insert(
-                ext,
+                ext.to_string(),
                 value.leak(),
             );
         }
