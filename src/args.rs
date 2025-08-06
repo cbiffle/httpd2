@@ -1,4 +1,6 @@
 //! Server argument parsing.
+//!
+//! This is factored out to be shared between both `httpd2` and `http301d`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -7,6 +9,7 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use nix::unistd::{Gid, Uid};
 
+/// Arguments shared by both the core `httpd2` server, and `http301d`.
 #[derive(Parser)]
 pub struct CommonArgs {
     /// Specifies that the server should chroot into ROOT. You basically always
@@ -94,6 +97,8 @@ pub struct CommonArgs {
     pub root: PathBuf,
 }
 
+/// Implemented by types that can expose a `CommonArgs` struct, so that other
+/// code can be general over the arguments type.
 pub trait HasCommonArgs {
     fn common(&self) -> &CommonArgs;
 }

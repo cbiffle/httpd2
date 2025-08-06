@@ -1,3 +1,9 @@
+//! `httpd2` command line server binary.
+//!
+//! This module is responsible for command line argument parsing, environment
+//! variable processing, setting up logging, and managing the threadpool for
+//! dispatching requests.
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
@@ -32,10 +38,15 @@ use httpd2::err::ServeError;
 use httpd2::sync::SharedSemaphore;
 use httpd2::serve;
 
+/// When requested (by the `system_allocator` feature) this forces the allocator
+/// to use the one provided by the system, rather than any fancier version Rust
+/// provides. This is important for using heap profiling tools, but should not
+/// be necessary in production.
 #[cfg(feature = "system_allocator")]
 #[global_allocator]
 static GLOBAL: std::alloc::System = std::alloc::System;
 
+/// Command line interface.
 #[derive(Parser)]
 #[clap(name = "httpd2")]
 pub struct Args {
@@ -144,7 +155,14 @@ fn main() {
 }
 
 /// Starts up a server.
-async fn start(args: Args, log: slog::Logger, mime_map: Arc<BTreeMap<String, &'static str>>) -> Result<(), ServeError> {
+///
+/// This is our async entry point. We haven't dropped privileges yet when we
+/// reach this point, because there are a couple of things we need to do first.
+async fn start(
+    args: Args,
+    log: slog::Logger,
+    mime_map: Arc<BTreeMap<String, &'static str>>,
+) -> Result<(), ServeError> {
     // Sanity check configuration.
     let root = Uid::from_raw(0);
     if Uid::current() == root {
@@ -293,6 +311,9 @@ fn handle_request(
 }
 
 /// Loads TLS credentials from the filesystem using synchronous operations.
+///
+/// Note that this probably needs to happen before dropping privileges, since
+/// the keyfiles are generally not accessible in the serving root.
 fn load_key_and_cert(
     key_path: &Path,
     cert_path: &Path,
