@@ -1,6 +1,6 @@
 [package]
 name = "httpd2"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Cliff L. Biffle <code@cliffle.com>"]
 edition = "2024"
 default-run = "httpd2"
