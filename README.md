@@ -11,7 +11,7 @@ of thing.)
 
 This repo also includes a derivative server, `http301d`, which only serves
 unencrypted HTTP/1 301 Moved Permanently redirects to your HTTPS server, and
-doens't read files from disk etc. It makes a nice port-80 counterpart to
+doesn't read files from disk etc. It makes a nice port-80 counterpart to
 `httpd2`.
 
 ## Disclaimer
