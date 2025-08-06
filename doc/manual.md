@@ -33,7 +33,8 @@ experience will be frustrating:
 
 - Static sites only. `httpd2` reads files from disk and sends them to the
   network. That's it. It won't run a PHP script, it won't connect to a database.
-  It won't even compress or decompress anything.
+  It won't even compress or decompress anything (though it supports all modern
+  compression methods using pre-compressed files).
   - This eliminates a large class of potential remote attacks that rely on code
     execution or generating large amounts of load.
   - This also keeps server load as low as possible, ensuring that the site
