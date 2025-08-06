@@ -300,31 +300,22 @@ fn load_key_and_cert(
     let key = rustls_pemfile::read_one(
         &mut io::BufReader::new(std::fs::File::open(key_path)?),
     ).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "can't load private key (bad file?)",
-        )
+        io::Error::other("can't load private key (bad file?)")
     })?;
     let key = key.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "no keys found in private key file",
-        )
+        io::Error::other("no keys found in private key file")
     })?;
     let key = match key {
         rustls_pemfile::Item::Pkcs8Key(der) => der.into(),
         rustls_pemfile::Item::Sec1Key(der) => der.into(),
-        _ => return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "unsupported private key type",
-        )),
+        _ => return Err(io::Error::other("unsupported private key type")),
     };
     let cert_chain = rustls_pemfile::certs(&mut io::BufReader::new(
         std::fs::File::open(cert_path)?,
     ))
     .collect::<Result<Vec<_>, _>>()
     .map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "can't load certificate")
+        io::Error::other("can't load certificate")
     })?;
     Ok((key, cert_chain))
 }

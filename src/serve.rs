@@ -113,7 +113,7 @@ pub async fn files(
             // Now, see what the path yields.
             let open_result = picky_open_with_redirect_and_alt(
                 &log,
-                &*mime_map,
+                &mime_map,
                 &mut sanitized,
                 accept_encodings,
             )
@@ -176,7 +176,7 @@ pub async fn files(
         // TODO: it would be nice to break the picky combinators out, so I could
         // have picky_open_with_alt (no redirect) here.
         let err_result =
-            picky_open_with_redirect_and_alt(&log, &*mime_map, &mut redirect, accept_encodings)
+            picky_open_with_redirect_and_alt(&log, &mime_map, &mut redirect, accept_encodings)
                 .await;
         if let Ok((error_page, enc)) = err_result {
             let (mut r, s) = serve_file(args.common(), error_page, enc, None, None, true);
@@ -354,7 +354,7 @@ async fn picky_open_with_redirect_and_alt(
 
     // If the caller isn't willing to accept any compressed encodings, we're
     // done.
-    if encodings.values().all(|&accept| accept == false) {
+    if encodings.values().all(|&accept| !accept) {
         return Ok((file, None));
     }
 
@@ -427,8 +427,7 @@ pub fn default_content_type_map() -> BTreeMap<String, &'static str> {
 /// Currently, this is hardcoded based on file extensions, like we're Windows.
 fn find_content_type(map: &BTreeMap<String, &'static str>, path: &Path) -> &'static str {
     path.extension().and_then(OsStr::to_str)
-        .and_then(|ext| map.get(ext))
-        .map(|r| *r)
+        .and_then(|ext| map.get(ext).copied())
         .unwrap_or("text/plain")
 }
 
@@ -505,7 +504,7 @@ fn serve_file(
 
     // Construct the basic response.
     let mut response =
-        start_response(args, file.len, file.content_type, modified, &*etag, file.ttl, encoding);
+        start_response(args, file.len, file.content_type, modified, &etag, file.ttl, encoding);
 
     // If a last-modified date was provided, and it matches, we want to
     // uniformly return a 304 without a body to both GET and HEAD requests.
