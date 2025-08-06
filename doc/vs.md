@@ -1,5 +1,9 @@
 # My comparison of `httpd2` with `publicfile`
 
+(This analysis was written in 2020, when I originally made `httpd2` public.
+Because `publicfile` hasn't changed in any significant way for nearly 30 years,
+its conclusions still mostly hold. I've updated it in places for 2025.)
+
 `httpd2` is my experimental HTTPS 1/2 static file server.
 
 [`publicfile`] is an HTTP1 static file server that inspired `httpd2`.
@@ -44,6 +48,8 @@ with these issues, I decided to do it again.
 ## Ways `httpd2` and `publicfile` are similar
 
 - Both programs serve parts of the filesystem to the web, and nothing else.
+  (Well, okay, `publicfile` also contains an FTP server for historical reasons.
+  `httpd2` does not.)
 
 - Both programs use the same methods for avoiding path traversal, TOCTOU, and
   unwanted file disclosure. Specifically, `httpd2` uses a direct gloss of
@@ -67,9 +73,10 @@ with these issues, I decided to do it again.
   its private key. I'll talk more about that in a bit.)
 
 - Neither program will read or parse a configuration file. There are few
-  configurable options, and they are all set by command line flags. This means
-  no parser codebase to target, and no risk of accidentally leaving the
-  configuration file writable by other users.
+  configurable options, and they are all set by command line flags or
+  deliberately simple environment variables. This means no parser codebase to
+  target, and no risk of accidentally leaving the configuration file writable by
+  other users.
 
 ## Ways `httpd2` is different
 
@@ -89,8 +96,8 @@ encryption, and IPv4/6. I have no intent to support unencrypted HTTP, which is
 effectively deprecated here in 2020.
 
 `httpd2` still uses a `publicfile`-style hardcoded set of MIME types, but the
-set is more appropriate for a static website in 2020. (I plan to make this
-configurable, eventually.)
+set is more appropriate for a static website in 2020, and the set can be
+extended using the environment.
 
 ### `httpd2` is an asynchronous, single-process server
 
@@ -160,8 +167,8 @@ this one.
 This has some implications for how I approach software engineering problems.
 
 - Buffer overrun, use-after-free, accidental memory leaks, and other memory
-  safety errors are much harder to produce. (You have to go out of your way
-  using `unsafe`.)
+  safety errors are much harder to produce. (You have to go out of your way,
+  generally by using `unsafe`.)
 
 - Integer overflow is trapped, and is thus a thing I don't need to spend time
   thinking about. This gets its own bullet because it's a very common source of
@@ -172,18 +179,19 @@ This has some implications for how I approach software engineering problems.
 
 - Because the likelihood of state corruption is lower (due to the above
   bullets), I am less wedded to the idea of `abort` on recoverable errors, which
-  means I can use a multithreaded instead of multiprocess server.
+  means I can use a single long-lived process containing multiple threads,
+  rather than a short-lived process-per-request.
 
 - The type system protects against data races and unguarded sharing of data
   across threads, so a large class of concurrency bugs are much harder to
-  produce -- so I can consider a multithreaded server _without_ reintroducing
-  opportunities for state corruption.
+  produce -- so I can consider a multithreaded server _without_ introducing
+  new opportunities for state corruption.
 
 - The availability of `async` means that I can write asynchronous, event-driven
-  code as straight-line code and let the compiler sort it out. This in turn
-  means that I'm willing to use event-driven state machines in contexts where
-  writing an explicit state machine by hand would have made the code too
-  difficult to audit and reason about.
+  code as though it were straight-line code and let the compiler sort it out.
+  This in turn means that I'm willing to use event-driven state machines in
+  contexts where writing an explicit state machine by hand would have made the
+  code too difficult to audit and reason about.
 
 My use of Rust here has also had some unexpected results (at least, I wasn't
 expecting them):
@@ -198,7 +206,7 @@ expecting them):
 - `httpd2` is considerably faster than Publicfile, particularly in high load
   situations. This is not because Rust is faster than C intrinsically -- it is
   because, by freeing my brain from worrying about C problems, I was able to
-  build a faster server.
+  build a faster server. By accident.
 
 ### `httpd2` relies on software written by other people.
 
@@ -209,14 +217,18 @@ the C library.* I think this is admirable, and I'm not doing it.
 `httpd2` relies on Tokio, Hyper, and Rustls, in addition to parts of the Rust
 standard library. These libraries are sure to contain bugs, but they are also
 mainstays of the Rust community, in production use by a lot of folks, and are
-fuzz-tested -- in addition to being written in Rust in the first place.
+fuzz-tested -- in addition to being written in Rust in the first place. (In
+fact, both Hyper and Rustls have had significant bugs since `httpd2` came out,
+but none of them affected `httpd2` thanks to other mitigations in the code.)
 
 But the reason I'm willing to do this mostly comes down to Rust's build system.
 The version of every library in `httpd2`'s transitive build graph is checked
 into this repo in `Cargo.lock`, including the cryptographic hashes of their
 source code. I know that you will get the same versions I tested against, and
 that will not change until I push an update to `Cargo.lock` (after, presumably,
-testing). This is _very much_ not the case in C.
+testing). This is _very much_ not the case in C in a traditional Unix
+environment, where you generally get "whatever version of the `so` this user's
+system has today."
 
 This is not without its drawbacks, of course.
 
