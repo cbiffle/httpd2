@@ -279,7 +279,7 @@ fn handle_request(
     mime_map: Arc<BTreeMap<String, &'static str>>,
     request_counter: &AtomicU64,
     req: Request<Incoming>,
-) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> {
+) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> + use<> {
     // Select a request ID and tag our logger with it.
     serve::files(
         args,
