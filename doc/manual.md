@@ -432,3 +432,44 @@ From top to bottom, we have:
   of CPUs, but since `httpd2` primarily uses threads to execute Unix blocking
   filesystem operations, this doesn't cause CPU contention.
 - `/public/file/0` is, for historical reasons, where my web content lives.
+
+
+## Adding MIME types (`Content-Type`)
+
+By default, `httpd2` contains a hardcoded mapping from file extension to MIME
+type. (It's in the `serve::default_content_type_map` function if you're
+curious.) This contains mappings for several file types that are common on the
+modern web, but may be missing mappings that you need.
+
+On startup, `httpd2` scans its environment variables for any variable whose name
+starts with `CT_` (case sensitive). It then attempts to process those variables
+as additional content-type mappings, as follows:
+
+1. The initial `CT_` is removed.
+2. The rest of the name of the environment variable is taken as a file
+   extension.
+3. The value of the variable is taken as the `Content-Type` to serve when a file
+   has that extension.
+
+As an example, you could re-create the default mapping for files with the
+extension `jpg` by setting an environment variable:
+
+```
+CT_jpg=image/jpeg
+```
+
+(You don't need to set that one, since it's bundled.)
+
+Providing your `httpd2` server process with a custom environment depends on how
+you run the process. If you're running from `systemd` (which is what I do) you
+can simply add the mapping to your `EnvironmentFile` specified in your unit
+declaration (so using the example declaration from the previous section,
+`/etc/default/httpd2`).
+
+If you're running the server from the command line for development, or from a
+shell script, you can either `export` the environment variables before running
+the server, or prefix them to the command line, e.g.
+
+```
+CT_jpg=image/jpeg /usr/local/bin/httpd2 --your-arguments-here
+```
