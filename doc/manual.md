@@ -76,6 +76,14 @@ experience will be frustrating:
     you trust yourself to see them.
   - `httpd2` also does not identify itself with an HTTP `server:` header.
 
+- Treat well-behaved clients well, and poorly-behaved clients cheaply.
+  - `httpd2` tries to be as fast as technically possible for normal clients
+    (browsers, RSS readers, and the like) while imposing low resource load on
+    the server.
+  - A client that goes outside the scope of normal behavior for accessing a
+    static website, such as by attempting a `POST` method or uploading a body
+    with a request, is assumed malicious and immediately disconnected.
+
 - Supplement the other security mitigations by relying on Rust.
   - Bounds-based attacks such as stack smashing and buffer overruns are
     significantly less likely.
