@@ -450,7 +450,7 @@ as additional content-type mappings, as follows:
 2. The rest of the name of the environment variable is taken as a file
    extension.
 3. The value of the variable is taken as the `Content-Type` to serve when a file
-   has that extension.
+   has that extension, overriding the default if necessary.
 
 As an example, you could re-create the default mapping for files with the
 extension `jpg` by setting an environment variable:
@@ -460,6 +460,10 @@ CT_jpg=image/jpeg
 ```
 
 (You don't need to set that one, since it's bundled.)
+
+You could also make your webserver behave strangely by setting
+`CT_jpg=text/plain`, which would override the default and tell clients that all
+your JPEG images are actually just text. But you probably shouldn't.
 
 Providing your `httpd2` server process with a custom environment depends on how
 you run the process. If you're running from `systemd` (which is what I do) you
