@@ -73,6 +73,28 @@ pub async fn files(
         return Err(DefenseError.into());
     }
 
+    // We have _both_ kinds of request methods, GET and HEAD. In practice,
+    // anything else out-of-the-blue is an exploit probe:
+    //
+    // - POST, GET, DELETE, and friends are trying to muck with server state.
+    // - OPTIONS can be sent by clients using CORS, but only as a preflight for
+    //   one of the above methods, which is itself a bad sign. Browsers don't
+    //   send it for GET/HEAD.
+    match method {
+        // The request method allowlist:
+        &Method::GET | &Method::HEAD => (),
+
+        _ => {
+            // Flag this client as misbehaved and deny.
+            slog::warn!(
+                log,
+                "defense";
+                "cause" => ?method,
+            );
+            return Err(DefenseError.into());
+        }
+    }
+
     // Other than logging, we defer work to the latest reasonable point, to
     // reduce the load of bogus requests on the server. This means that bogus
     // requests will incur lower latency than legit ones, but the only
@@ -80,91 +102,77 @@ pub async fn files(
     // exist on the filesystem ... which is exactly what the HTTP server is for.
 
     let mut accept_encodings = EnumMap::default();
-    let (mut response, mut response_info) = match (method, uri.path()) {
-        (&Method::GET, path) | (&Method::HEAD, path) => {
-            // Sanitize the path using a derivative of publicfile's algorithm.
-            // It appears that Hyper blocks non-ASCII characters.
-            let mut sanitized = sanitize_path(path);
+    let path = uri.path();
+    let (mut response, mut response_info) = {
+        // Sanitize the path using a derivative of publicfile's algorithm.
+        // It appears that Hyper blocks non-ASCII characters.
+        let mut sanitized = sanitize_path(path);
 
-            // Scan the request headers to see if compressed responses are OK.
-            // We need to do this before consulting the filesystem, but it's
-            // fairly quick.
-            req
-                .headers()
-                // The header can technically be specified more than once.
-                .get_all(hyper::header::ACCEPT_ENCODING)
-                .iter()
-                // Ignore any that aren't UTF-8. We need UTF-8 to get trim()
-                // below, and all our recognized ones are ASCII anyway.
-                .filter_map(|list| list.to_str().ok())
-                // Split them all at commas and merge them together.
-                .flat_map(|list| list.split(','))
-                // Algorithms may have semicolon-delimited attributes; remove
-                // them.
-                .map(|name| name.split_once(';').map(|(before, _)| before).unwrap_or(name))
-                // Collect the methods we recognize, ignoring leading or
-                // trailing whitespace.
-                .for_each(|name| match name.trim() {
-                    "gzip" => accept_encodings[Encoding::Gzip] = true,
-                    "br" => accept_encodings[Encoding::Brotli] = true,
-                    _ => (),
-                });
+        // Scan the request headers to see if compressed responses are OK.
+        // We need to do this before consulting the filesystem, but it's
+        // fairly quick.
+        req.headers()
+            // The header can technically be specified more than once.
+            .get_all(hyper::header::ACCEPT_ENCODING).iter()
+            // Ignore any that aren't UTF-8. We need UTF-8 to get trim()
+            // below, and all our recognized ones are ASCII anyway.
+            .filter_map(|list| list.to_str().ok())
+            // Split them all at commas and merge them together.
+            .flat_map(|list| list.split(','))
+            // Algorithms may have semicolon-delimited attributes; remove
+            // them.
+            .map(|name| name.split_once(';').map(|(before, _)| before).unwrap_or(name))
+            // Collect the methods we recognize, ignoring leading or
+            // trailing whitespace.
+            .for_each(|name| match name.trim() {
+                "gzip" => accept_encodings[Encoding::Gzip] = true,
+                "br" => accept_encodings[Encoding::Brotli] = true,
+                _ => (),
+            });
 
-            // Now, see what the path yields.
-            let open_result = picky_open_with_redirect_and_alt(
-                &log,
-                &mime_map,
-                &mut sanitized,
-                accept_encodings,
-            )
-            .await;
+        // Now, see what the path yields.
+        let open_result = picky_open_with_redirect_and_alt(
+            &log,
+            &mime_map,
+            &mut sanitized,
+            accept_encodings,
+        ).await;
 
-            match open_result {
-                Ok((file, enc)) => {
-                    // Collect the caller's cache date and etag, if present.
-                    //
-                    // Because the date format is fixed as of HTTP/1.1, and
-                    // because caches send the *exact* previous date in
-                    // if-modified-since, we can get away with doing an exact
-                    // bytewise date comparison rather than parsing.
-                    //
-                    // ETag is already defined as an exact comparison.
-                    let if_modified_since = req
-                        .headers()
-                        .get(hyper::header::IF_MODIFIED_SINCE)
-                        .and_then(|value| value.to_str().ok());
-                    let if_none_match = req
-                        .headers()
-                        .get(hyper::header::IF_NONE_MATCH)
-                        .and_then(|value| value.to_str().ok());
+        match open_result {
+            Ok((file, enc)) => {
+                // Collect the caller's cache date and etag, if present.
+                //
+                // Because the date format is fixed as of HTTP/1.1, and
+                // because caches send the *exact* previous date in
+                // if-modified-since, we can get away with doing an exact
+                // bytewise date comparison rather than parsing.
+                //
+                // ETag is already defined as an exact comparison.
+                let if_modified_since = req.headers()
+                    .get(hyper::header::IF_MODIFIED_SINCE)
+                    .and_then(|value| value.to_str().ok());
+                let if_none_match = req.headers()
+                    .get(hyper::header::IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok());
 
-                    let (resp, srv) = serve_file(
-                        args.common(),
-                        file,
-                        enc,
-                        if_modified_since,
-                        if_none_match,
-                        method == Method::GET,
-                    );
-                    (resp, ResponseInfo::Success(srv))
-                }
-                Err(e) => (
-                    Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(empty())
-                        .unwrap(),
-                    ResponseInfo::Error(ErrorContext::Error(e), None),
-                ),
+                let (resp, srv) = serve_file(
+                    args.common(),
+                    file,
+                    enc,
+                    if_modified_since,
+                    if_none_match,
+                    method == Method::GET,
+                );
+                (resp, ResponseInfo::Success(srv))
             }
+            Err(e) => (
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(empty())
+                    .unwrap(),
+                ResponseInfo::Error(ErrorContext::Error(e), None),
+            ),
         }
-        // Any other request method falls here.
-        _ => (
-            Response::builder()
-                .status(StatusCode::NOT_IMPLEMENTED)
-                .body(empty())
-                .unwrap(),
-            ResponseInfo::Error(ErrorContext::Fixed("bad method"), None),
-        ),
     };
 
     if let ResponseInfo::Error(_, srv) = &mut response_info {
@@ -224,6 +232,7 @@ pub async fn files(
 }
 
 enum ErrorContext {
+    #[allow(dead_code)] // TODO remove this once confident
     Fixed(&'static str),
     Error(picky::Error),
 }
