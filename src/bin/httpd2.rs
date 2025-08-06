@@ -5,22 +5,18 @@
 //! dispatching requests.
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::pin::pin;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
 
-use bytes::Bytes;
-use hyper::body::{Incoming, Body};
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper::service::service_fn;
-use hyper::{Request, Response};
 
 use nix::unistd::{Gid, Uid};
 
@@ -269,45 +265,63 @@ async fn serve_connection(
     // Begin handling requests. The request_counter tracks
     // request IDs within this connection.
     let request_counter = AtomicU64::new(0);
-    let connection_server = http.serve_connection(
+    // The self_defense channel allows any request on the connection to warn the
+    // others.
+    let (self_defense_send, mut self_defense_recv) = tokio::sync::mpsc::channel(1);
+    let connection_server = pin!(http.serve_connection(
         hyper_util::rt::tokio::TokioIo::new(stream),
         service_fn(|x| {
             let mime_map = Arc::clone(&mime_map);
-            handle_request(args.clone(), &log, mime_map, &request_counter, x)
+            // Select a new request ID and tag our logger with it.
+            let log = log.new(slog::o!(
+                    "rid" => request_counter
+                    .fetch_add(1, Ordering::Relaxed),
+            ));
+            let self_defense = self_defense_send.clone();
+            let args = args.clone();
+            async move {
+                let result = serve::files(
+                    args,
+                    log,
+                    mime_map,
+                    x,
+                ).await;
+                // Convert a Defense error in _one_ stream into a problem for
+                // _all_ streams.
+                if let Err(ServeError::Defense(_)) = result {
+                    self_defense.try_send(()).ok();
+                }
+                result
+            }
         }),
-    );
-    match timeout(args.common.connection_time_limit, connection_server).await {
-        Err(_) => {
+    ));
+    let timeout_sleep = tokio::time::sleep(args.common.connection_time_limit);
+    tokio::select! {
+        // Normally, we expect to get here when the connection wraps up.
+        conn_result = connection_server => {
+            match conn_result {
+                Ok(_) => slog::info!(log, "closed"),
+                Err(e) => {
+                    slog::info!(log, "closed"; "cause" => "error");
+                    slog::debug!(log, "error"; "msg" => %e);
+                }
+            }
+        }
+        // Abort the connection (dropping it) if the self defense signal
+        // triggers.
+        _ = self_defense_recv.recv() => {
+            slog::info!(log, "closed"; "cause" => "self-defense");
+            // Note that we're not doing a `conn.graceful_shutdown()` here. We
+            // could, though that would also require us to poll the connection
+            // to completion. But the shutdown we want here is _not_ graceful,
+            // since the client has misbehaved. We really do want to kill off
+            // all activity related to all requests on the connection.
+        }
+        // Also drop the connection if it lives too long.
+        _ = timeout_sleep => {
             slog::info!(log, "closed"; "cause" => "timeout");
         }
-        Ok(conn_result) => match conn_result {
-            Ok(_) => slog::info!(log, "closed"),
-            Err(e) => {
-                slog::info!(log, "closed"; "cause" => "error");
-                slog::debug!(log, "error"; "msg" => %e);
-            }
-        },
     }
-}
-
-/// Request handler. This mostly defers to the `serve` module right now.
-fn handle_request(
-    args: Arc<Args>,
-    log: &slog::Logger,
-    mime_map: Arc<BTreeMap<String, &'static str>>,
-    request_counter: &AtomicU64,
-    req: Request<Incoming>,
-) -> impl Future<Output = Result<Response<Pin<Box<dyn Body<Data = Bytes, Error = ServeError> + Send>>>, ServeError>> + use<> {
-    // Select a request ID and tag our logger with it.
-    serve::files(
-        args,
-        log.new(slog::o!(
-            "rid" => request_counter
-            .fetch_add(1, Ordering::Relaxed),
-        )),
-        mime_map,
-        req,
-    )
 }
 
 /// Loads TLS credentials from the filesystem using synchronous operations.
