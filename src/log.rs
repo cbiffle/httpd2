@@ -1,5 +1,7 @@
 //! Logging support code.
 
+/// Makes a key-value optional, so it can be tossed at a log record without
+/// requiring conditional code.
 pub struct OptionKV<T>(Option<T>);
 
 impl<T> From<Option<T>> for OptionKV<T> {

@@ -14,6 +14,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use httpd2::log::OptionKV;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper::service::service_fn;
@@ -86,6 +87,9 @@ pub struct Args {
         value_name="SECS"
     )]
     pub tls_handshake_time_limit: Duration,
+
+    #[clap(long)]
+    pub log_server_name: bool,
 }
 
 impl HasCommonArgs for Args {
@@ -254,12 +258,20 @@ async fn serve_connection(
         let alpn =
             std::str::from_utf8(session.alpn_protocol().unwrap_or(b"NONE"))
                 .unwrap_or("BOGUS");
+        let server_name = if args.log_server_name {
+            session.server_name().map(|v| {
+                slog::o!("sn" => v)
+            })
+        } else {
+            None
+        };
         slog::info!(
             log,
             "tls-init";
             "alpn" => alpn,
             "tls" => ?session.protocol_version().unwrap(),
             "cipher" => ?session.negotiated_cipher_suite().unwrap().suite(),
+            OptionKV::from(server_name),
         );
     }
 
