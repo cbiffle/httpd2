@@ -18,7 +18,7 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper::service::service_fn;
 
-use nix::unistd::{Gid, Uid};
+use nix::unistd::Uid;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
@@ -33,6 +33,7 @@ use httpd2::args::{CommonArgs, Log, HasCommonArgs};
 use httpd2::err::ServeError;
 use httpd2::sync::SharedSemaphore;
 use httpd2::serve;
+use httpd2::security;
 
 /// When requested (by the `system_allocator` feature) this forces the allocator
 /// to use the one provided by the system, rather than any fancier version Rust
@@ -182,7 +183,7 @@ async fn start(
     let listener = tokio::net::TcpListener::bind(&args.common.addr).await?;
 
     // Dropping privileges here...
-    drop_privs(&log, args.common())?;
+    security::drop_privs(&log, args.common())?;
 
     let (tls_acceptor, http) = configure_server_bits(&args, key, cert_chain)?;
     let args = Arc::new(args);
@@ -353,33 +354,6 @@ fn load_key_and_cert(
         io::Error::other("can't load certificate")
     })?;
     Ok((key, cert_chain))
-}
-
-/// Drops the set of privileges requested in `args`. At minimum, this changes
-/// the CWD; at most, it chroots and changes to an unprivileged user.
-fn drop_privs(log: &slog::Logger, args: &CommonArgs) -> Result<(), ServeError> {
-    std::env::set_current_dir(&args.root)?;
-
-    if args.should_chroot {
-        nix::unistd::chroot(&args.root)?;
-    }
-    if let Some(gid) = args.gid {
-        nix::unistd::setgid(gid)?;
-        nix::unistd::setgroups(&[gid])?;
-    }
-    if let Some(uid) = args.uid {
-        nix::unistd::setuid(uid)?;
-    }
-    slog::info!(
-        log,
-        "privs";
-        "cwd" => %args.root.display(),
-        "chroot" => args.should_chroot,
-        "setuid" => args.uid.map(Uid::as_raw),
-        "setgid" => args.gid.map(Gid::as_raw),
-    );
-
-    Ok(())
 }
 
 /// Configure TLS and HTTP options for the server.

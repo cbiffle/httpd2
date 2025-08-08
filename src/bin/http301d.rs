@@ -14,7 +14,7 @@ use hyper::server::conn::http1::Builder as ConnBuilder;
 use hyper::service::service_fn;
 use hyper::{Request, Response, Method, Uri, StatusCode};
 
-use nix::unistd::{Gid, Uid};
+use nix::unistd::Uid;
 
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -23,6 +23,7 @@ use clap::Parser;
 
 use httpd2::args::{CommonArgs, Log, HasCommonArgs};
 use httpd2::err::ServeError;
+use httpd2::security;
 use httpd2::sync::SharedSemaphore;
 
 #[cfg(feature = "system_allocator")]
@@ -112,7 +113,7 @@ async fn start(args: Args, log: slog::Logger) -> Result<(), ServeError> {
     let listener = tokio::net::TcpListener::bind(&args.common.addr).await?;
 
     // Dropping privileges here...
-    drop_privs(&log, args.common())?;
+    security::drop_privs(&log, args.common())?;
 
     let http = configure_server_bits(&args)?;
     let args = Arc::new(args);
@@ -236,33 +237,6 @@ async fn handle_request(
                 .unwrap())
         }
     }
-}
-
-/// Drops the set of privileges requested in `args`. At minimum, this changes
-/// the CWD; at most, it chroots and changes to an unprivileged user.
-fn drop_privs(log: &slog::Logger, args: &CommonArgs) -> Result<(), ServeError> {
-    std::env::set_current_dir(&args.root)?;
-
-    if args.should_chroot {
-        nix::unistd::chroot(&args.root)?;
-    }
-    if let Some(gid) = args.gid {
-        nix::unistd::setgid(gid)?;
-        nix::unistd::setgroups(&[gid])?;
-    }
-    if let Some(uid) = args.uid {
-        nix::unistd::setuid(uid)?;
-    }
-    slog::info!(
-        log,
-        "privs";
-        "cwd" => %args.root.display(),
-        "chroot" => args.should_chroot,
-        "setuid" => args.uid.map(Uid::as_raw),
-        "setgid" => args.gid.map(Gid::as_raw),
-    );
-
-    Ok(())
 }
 
 /// Configure HTTP options for the server.
