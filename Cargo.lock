@@ -643,6 +643,7 @@ name = "httpd2"
 version = "0.2.0"
 dependencies = [
  "bytes",
+ "cfg-if",
  "clap",
  "enum-map",
  "futures",

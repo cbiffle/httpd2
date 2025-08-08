@@ -37,6 +37,7 @@ rustls-pemfile = "2.0.0"
 hyper-util = { version = "0.1.2", features = ["server", "server-auto", "tokio"] }
 enum-map = "2.7.3"
 thiserror = "2.0"
+cfg-if = "1.0.1"
 
 [profile.release]
 debug = 2
