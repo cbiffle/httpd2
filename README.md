@@ -1,5 +1,8 @@
 # A modern static file server
 
+(Note: the canonical repo for this project is [on
+Codeberg](https://codeberg.org/cliffle/httpd2).)
+
 `httpd2` (working title, as it's the second one I've written recently) is a
 program that serves web pages / resources to the public. And that's it. For more
 details see [the manual](doc/manual.md).
